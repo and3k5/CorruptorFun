@@ -1,0 +1,13 @@
+[package]
+name = "ps1"
+version = "0.1.0"
+edition = "2021"
+description = "PlayStation BIOS boot emulator for CorruptorFun"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "ps1-cli"
+path = "src/bin/cli.rs"

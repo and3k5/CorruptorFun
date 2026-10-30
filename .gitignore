@@ -8,3 +8,7 @@ dist
 *.img
 *.iso
 *.cue
+
+# Build outputs of the Rust emulator cores
+emu/target
+src/wasm

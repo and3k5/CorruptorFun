@@ -8,25 +8,17 @@ you load never leave your browser.
 
 ### BIOS corruptor (`#/bios`)
 
-Load your own BIOS dump, corrupt it, and watch the boot sequence break.
-No BIOS images are included or downloaded: you have to supply your own.
-Loaded files are kept in the browser's IndexedDB so you can keep re-corrupting
-the untouched original without picking it again.
+Load your own BIOS dump, corrupt it, and boot it in an emulator written for
+this site (Rust compiled to WebAssembly). No BIOS images are included or
+downloaded. Loaded BIOS files are kept in the browser's IndexedDB so you can
+keep re-corrupting the untouched original.
 
-| Console | How it's rendered |
-| --- | --- |
-| PlayStation | **Real BIOS** in an emulator (EmulatorJS + pcsx_rearmed), plus a simulated mode. With no disc, the BIOS plays its intro and opens the shell; load your own game image to see the licensed screen. |
-| PlayStation 2 | Simulated: towers, SCE screen, then the PS2 logo (licensed disc) or the browser menu. |
-| Xbox | Simulated: green energy swirl into the X emblem. |
-| Xbox 360 | Simulated: the green orb. Uses a NAND dump (or any file) as the data source. |
-
-**Why not emulate them all?** There's no usable in-browser PS2, Xbox or 360
-emulator, and the Xbox / 360 boot code is encrypted. The simulated scenes are
-re-creations where each visual parameter is wired to its own slice of your
-file: clean bytes give the stock animation, corrupted bytes in that slice bend
-that parameter. So *where* you corrupt decides *what* breaks, and a seed always
-gives the same result. You can download the corrupted BIOS and run it in a real
-emulator (PCSX2, xemu, ...).
+- **PlayStation:** our own core in `emu/ps1` boots the real (corrupted) BIOS:
+  intro, boot sound, and the memory card / CD player shell. Add your own game
+  disc image (.cue + .bin, .bin or .iso) to see the licensed screen; emulation
+  stops when the BIOS hands control to the game.
+- **PlayStation 2:** in progress. You can already store, corrupt and download
+  PS2 BIOS files.
 
 Corruption engines: bit flip, random byte, nudge, XOR mask, smear, block shift,
 zero out. Pick a byte range (or a preset region), a hit count or "every Nth
@@ -34,17 +26,33 @@ byte", and a seed.
 
 ## Development
 
+Needs Node 22 and Rust with the `wasm32-unknown-unknown` target
+(`rustup target add wasm32-unknown-unknown`).
+
 ```sh
 npm install
-npm run dev     # local dev server
-npm test        # unit tests for the corruption engine
+npm run dev     # builds the WASM core, then starts the dev server
+npm test        # JS unit tests + Rust tests
 npm run build   # static site in dist/
 ```
 
-To test the PS1 emulator offline, put the `@emulatorjs/emulatorjs` package's
-`data/` folder at `public/ejs-local/emulatorjs/data/` and the
-`@emulatorjs/core-pcsx_rearmed` package at `public/ejs-local/core-pcsx_rearmed/`,
-then run `VITE_EJS_LOCAL=/ejs-local/ npm run dev`. Don't commit that folder.
+### PS1 core
+
+`emu/ps1` is a PlayStation emulator scoped to the BIOS boot: R3000A CPU with
+load/branch delay slots and exceptions, GTE, GPU software rasterizer, DMA,
+timers, interrupt controller, CD-ROM controller, controller port and an SPU
+mixer. It runs in a Web Worker (`src/emu/ps1.worker.js`), so a BIOS that
+crashes or hangs can't freeze the page.
+
+`emu/ps1/src/bin/cli.rs` is a headless runner for debugging:
+
+```sh
+cd emu && cargo run --release --bin ps1-cli -- BIOS.BIN --frames 600 --out frame.ppm
+```
+
+`emu/ps1/tests/mips` holds small PS1 test programs (CPU, GPU, CD-ROM) built
+with clang's MIPS target: `./build.sh cputest.c`, then run the `.exe` with
+`ps1-cli <any 512 KB file> --exe cputest.exe`.
 
 ### Adding a toy
 
@@ -56,8 +64,4 @@ Add an entry to `src/collection.js` and a route in `src/router.js`.
 One-time setup: in the repository's **Settings → Pages**, set **Source** to
 **GitHub Actions**.
 
-## Credits
-
-The PS1 emulator is [EmulatorJS](https://github.com/EmulatorJS/EmulatorJS) with
-the [pcsx_rearmed](https://github.com/libretro/pcsx_rearmed) core (both GPL-3.0),
-loaded from jsDelivr at runtime. Not affiliated with Sony or Microsoft.
+Not affiliated with Sony.

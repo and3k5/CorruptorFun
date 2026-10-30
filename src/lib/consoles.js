@@ -12,18 +12,11 @@ export const CONSOLES = {
     short: 'PS1',
     sizes: [512 * KB],
     fileHint: 'e.g. SCPH1001.BIN / SCPH5501.BIN / SCPH7502.BIN (512 KB)',
-    realEmulation: true,
-    licensed: true,
     regions: [
       { label: 'Whole BIOS', start: 0, end: null },
       { label: 'Kernel', start: 0x00000, end: 0x10000 },
       { label: 'Boot intro & shell', start: 0x18000, end: 0x64000 },
       { label: 'Font area', start: 0x66000, end: 0x80000 },
-    ],
-    strings: [
-      { key: 'company', needles: ['Sony Computer Entertainment Inc'], fallback: 'Sony Computer Entertainment' },
-      { key: 'version', needles: ['System ROM Version'], fallback: 'System ROM Version' },
-      { key: 'licensed', needles: ['Licensed by'], fallback: 'Licensed by' },
     ],
   },
   ps2: {
@@ -32,51 +25,12 @@ export const CONSOLES = {
     short: 'PS2',
     sizes: [4 * MB, 8 * MB],
     fileHint: 'e.g. SCPH-39001.bin / SCPH-70012.bin (4 MB)',
-    realEmulation: false,
-    licensed: true,
     regions: [
       { label: 'Whole BIOS', start: 0, end: null },
       { label: 'Reset & kernel', start: 0x00000, end: 0x40000 },
       { label: 'First 1 MB (OSD modules)', start: 0x40000, end: 0x100000 },
       { label: 'Last 3 MB', start: 0x100000, end: null },
     ],
-    strings: [
-      { key: 'company', needles: ['Sony Computer Entertainment'], fallback: 'Sony Computer Entertainment' },
-      { key: 'osd', needles: ['OSDSYS'], fallback: 'OSDSYS' },
-      { key: 'browser', needles: ['Browser'], fallback: 'Browser' },
-      { key: 'config', needles: ['System Configuration'], fallback: 'System Configuration' },
-    ],
-  },
-  xbox: {
-    id: 'xbox',
-    name: 'Xbox',
-    short: 'Xbox',
-    sizes: [256 * KB, 512 * KB, 1 * MB],
-    fileHint: 'a 256 KB or 1 MB Xbox BIOS image',
-    realEmulation: false,
-    licensed: false,
-    regions: [
-      { label: 'Whole BIOS', start: 0, end: null },
-      { label: 'First quarter', start: 0, end: 64 * KB },
-      { label: 'Middle', start: 64 * KB, end: 192 * KB },
-      { label: 'Last 64 KB', start: 192 * KB, end: 256 * KB },
-    ],
-    strings: [],
-  },
-  x360: {
-    id: 'x360',
-    name: 'Xbox 360',
-    short: '360',
-    sizes: [16 * MB, 64 * MB, 256 * MB, 512 * MB],
-    fileHint: 'a NAND dump (16 MB, 64 MB, ...). Any file works as a data source',
-    realEmulation: false,
-    licensed: false,
-    regions: [
-      { label: 'Whole file', start: 0, end: null },
-      { label: 'First 1 MB (bootloaders)', start: 0, end: 1 * MB },
-      { label: 'Rest of the flash', start: 1 * MB, end: null },
-    ],
-    strings: [],
   },
 };
 
@@ -100,29 +54,22 @@ export function detectConsole(bytes) {
   if (size === 512 * KB && includesAscii(bytes, 'Sony Computer Entertainment') >= 0) return 'ps1';
   if ((size === 4 * MB || size === 8 * MB) && includesAscii(bytes, 'RESET', 0x10000) >= 0) return 'ps2';
   if (size === 4 * MB) return 'ps2';
-  if (size === 256 * KB || size === 1 * MB) return 'xbox';
-  if (size >= 16 * MB) return 'x360';
   if (size === 512 * KB) return 'ps1';
   return null;
 }
 
-// Locate the strings a scene wants to draw so we can re-read them from the
-// corrupted copy later.
-export function locateStrings(consoleId, original) {
-  const out = {};
-  for (const s of CONSOLES[consoleId].strings) {
-    let found = null;
-    for (const needle of s.needles) {
-      const at = includesAscii(original, needle);
-      if (at >= 0) {
-        // Grow forward to the end of the printable run so we pick up the full text.
-        let end = at;
-        while (end < original.length && end - at < 64 && original[end] >= 0x20 && original[end] < 0x7f) end++;
-        found = { offset: at, length: end - at };
-        break;
-      }
-    }
-    out[s.key] = { ...found, fallback: s.fallback };
+// Region letter of a PS1 BIOS from its version string, e.g.
+// "System ROM Version 4.1 12/16/97 E". The CD-ROM answers GetID with the
+// matching SCEx code so a licensed disc boots. Returns 'A', 'E' or 'I'.
+export function ps1Region(bios) {
+  const at = includesAscii(bios, 'System ROM Version');
+  if (at >= 0) {
+    let end = at;
+    while (end < bios.length && bios[end] >= 0x20 && bios[end] < 0x7f) end++;
+    const last = String.fromCharCode(bios[end - 1]);
+    if (last === 'A') return 'A';
+    if (last === 'J') return 'I';
+    if (last === 'E') return 'E';
   }
-  return out;
+  return 'E';
 }

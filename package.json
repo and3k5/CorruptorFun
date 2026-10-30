@@ -5,10 +5,11 @@
   "type": "module",
   "description": "A collection of browser-only toys that corrupt data and render the result.",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "build:wasm": "cd emu && cargo build --release --target wasm32-unknown-unknown -p ps1 --lib && node -e \"require('fs').mkdirSync('../src/wasm',{recursive:true});require('fs').copyFileSync('target/wasm32-unknown-unknown/release/ps1.wasm','../src/wasm/ps1.wasm')\"",
+    "dev": "npm run build:wasm && vite",
+    "build": "npm run build:wasm && vite build",
     "preview": "vite preview",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js && cd emu && cargo test --release"
   },
   "dependencies": {
     "vue": "^3.5.44",
