@@ -1,14 +1,11 @@
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref, shallowRef, watch } from 'vue';
-import { CONSOLES, CONSOLE_LIST, detectConsole, locateStrings } from '../lib/consoles.js';
+import { CONSOLES, CONSOLE_LIST, detectConsole, ps1Region } from '../lib/consoles.js';
 import { DEFAULT_SETTINGS, ENGINES, clampRange, corrupt } from '../lib/corrupt.js';
-import { BiosFeed } from '../lib/feed.js';
 import { deleteBios, listBios, loadBios, saveBios } from '../lib/storage.js';
-import { makeZip } from '../lib/zip.js';
-import { SCENES } from '../scenes/index.js';
-import SceneCanvas from '../components/SceneCanvas.vue';
+import { loadDisc } from '../lib/disc.js';
 import ByteMap from '../components/ByteMap.vue';
-import Ps1Emulator from '../components/Ps1Emulator.vue';
+import Ps1Screen from '../components/Ps1Screen.vue';
 
 const PREFS_KEY = 'corruptorfun.bios.prefs';
 
@@ -21,39 +18,29 @@ function readPrefs() {
 }
 const prefs = readPrefs();
 
-const consoleId = ref(prefs.consoleId || 'ps1');
+const consoleId = ref(CONSOLES[prefs.consoleId] ? prefs.consoleId : 'ps1');
 const settings = reactive({ ...DEFAULT_SETTINGS, ...(prefs.settings?.[consoleId.value] || {}) });
-const licensed = ref(prefs.licensed ?? true);
-const sound = ref(prefs.sound ?? false);
-const view = ref(prefs.view || 'sim'); // 'sim' | 'emu'
 
 const library = ref([]);
 const current = shallowRef(null); // { id, name, consoleId, data }
 const result = shallowRef(null); // { data, hits }
-const bootKey = ref(0);
 const message = ref('');
 const busy = ref(false);
 const storageOk = ref(true);
 const disc = shallowRef(null);
 const discLabel = ref('');
-const emu = ref(null);
+const discError = ref('');
+const screen = ref(null);
 
 const cons = computed(() => CONSOLES[consoleId.value]);
-const scene = computed(() => SCENES[consoleId.value]);
 const forConsole = computed(() => library.value.filter((b) => b.consoleId === consoleId.value));
-const strings = computed(() => (current.value ? locateStrings(consoleId.value, current.value.data) : {}));
-const feed = computed(() => {
-  if (!current.value) return null;
-  return new BiosFeed(current.value.data, result.value?.data || current.value.data, strings.value);
-});
 const range = computed(() => (current.value ? clampRange(settings, current.value.data.length) : { start: 0, end: 0 }));
+const region = computed(() => (current.value && consoleId.value === 'ps1' ? ps1Region(current.value.data) : 'E'));
+const bootBytes = computed(() => result.value?.data || current.value?.data);
 
 function savePrefs() {
   const all = readPrefs();
   all.consoleId = consoleId.value;
-  all.licensed = licensed.value;
-  all.sound = sound.value;
-  all.view = view.value;
   all.settings = { ...(all.settings || {}), [consoleId.value]: { ...settings } };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(all));
@@ -61,7 +48,7 @@ function savePrefs() {
     // Preferences are a convenience only.
   }
 }
-watch([settings, licensed, sound, view], savePrefs, { deep: true });
+watch(settings, savePrefs, { deep: true });
 
 async function refreshLibrary() {
   try {
@@ -76,7 +63,6 @@ async function selectConsole(id) {
   savePrefs();
   consoleId.value = id;
   Object.assign(settings, DEFAULT_SETTINGS, readPrefs().settings?.[id] || {});
-  if (!CONSOLES[id].realEmulation) view.value = 'sim';
   current.value = null;
   result.value = null;
   savePrefs();
@@ -90,7 +76,7 @@ async function useStored(id) {
     const rec = await loadBios(id);
     if (!rec) return;
     current.value = rec;
-    runCorruption();
+    result.value = null;
   } finally {
     busy.value = false;
   }
@@ -106,9 +92,9 @@ async function onFile(ev) {
     const data = new Uint8Array(await file.arrayBuffer());
     const guess = detectConsole(data);
     if (guess && guess !== consoleId.value) {
-      message.value = `That looks like a ${CONSOLES[guess].name} file, so I switched to ${CONSOLES[guess].name}.`;
+      message.value = `That looks like a ${CONSOLES[guess].name} BIOS, so I switched to ${CONSOLES[guess].name}.`;
       await selectConsole(guess);
-    } else if (!guess || !cons.value.sizes.includes(data.length)) {
+    } else if (!cons.value.sizes.includes(data.length)) {
       message.value = `Unusual size for a ${cons.value.name} BIOS (${data.length.toLocaleString()} bytes). Using it anyway.`;
     }
     let stored = { id: null };
@@ -119,7 +105,7 @@ async function onFile(ev) {
       storageOk.value = false;
     }
     current.value = { id: stored.id, consoleId: consoleId.value, name: file.name, data };
-    runCorruption();
+    result.value = null;
   } finally {
     busy.value = false;
   }
@@ -134,12 +120,15 @@ async function remove(id) {
   await refreshLibrary();
 }
 
+function bootNow() {
+  // Wait for the screen to receive the new bytes before rebooting it.
+  nextTick(() => screen.value?.boot());
+}
+
 function runCorruption() {
   if (!current.value) return;
   result.value = corrupt(current.value.data, settings);
-  bootKey.value++;
-  // Wait for the emulator to receive the new bytes before rebooting it.
-  if (view.value === 'emu') nextTick(() => emu.value?.boot());
+  bootNow();
 }
 
 function reroll() {
@@ -147,9 +136,9 @@ function reroll() {
   runCorruption();
 }
 
-function resetToClean() {
+function cleanBoot() {
   result.value = null;
-  bootKey.value++;
+  bootNow();
 }
 
 function applyRegion(r) {
@@ -181,17 +170,18 @@ function download() {
 }
 
 async function onDisc(ev) {
-  const files = [...(ev.target.files || [])];
-  ev.target.value = '';
-  if (!files.length) return;
-  if (files.length === 1) {
-    disc.value = files[0];
-  } else {
-    // A .cue with its .bin tracks: hand them over together as one zip.
-    const entries = await Promise.all(files.map(async (f) => ({ name: f.name, data: new Uint8Array(await f.arrayBuffer()) })));
-    disc.value = makeZip(entries);
+  const files = ev.target.files;
+  discError.value = '';
+  if (!files?.length) return;
+  try {
+    const d = await loadDisc(files);
+    disc.value = d.data;
+    discLabel.value = d.label;
+  } catch (e) {
+    discError.value = e.message;
+  } finally {
+    ev.target.value = '';
   }
-  discLabel.value = files.map((f) => f.name).join(', ');
 }
 
 function clearDisc() {
@@ -211,8 +201,8 @@ onMounted(async () => {
 <template>
   <h1>BIOS corruptor</h1>
   <p class="muted lead">
-    Load your own BIOS dump, corrupt it, and watch the boot sequence go wrong. Files stay in this browser:
-    they are kept in local storage so you can keep corrupting without picking them again.
+    Load your own BIOS dump, corrupt it, and boot it in our own emulator, running right here in your browser. BIOS files are
+    kept in this browser so you can keep corrupting the untouched original.
   </p>
 
   <nav class="tabs" aria-label="Console">
@@ -223,59 +213,40 @@ onMounted(async () => {
 
   <div class="layout">
     <section class="stage panel">
-      <div class="row stage-head">
-        <h2>{{ cons.name }} boot</h2>
-        <div v-if="cons.realEmulation" class="seg" role="tablist">
-          <button :class="{ active: view === 'sim' }" @click="view = 'sim'">Simulated</button>
-          <button :class="{ active: view === 'emu' }" @click="view = 'emu'">Real BIOS (emulated)</button>
-        </div>
+      <h2>{{ cons.name }} boot</h2>
+
+      <div v-if="!current" class="empty">
+        <p>Load a {{ cons.name }} BIOS to start.</p>
+        <p class="note">{{ cons.fileHint }}</p>
+        <label class="button primary file">
+          Choose BIOS file
+          <input type="file" @change="onFile" />
+        </label>
       </div>
 
-      <template v-if="!current">
-        <div class="empty">
-          <p>Load a {{ cons.name }} BIOS to start.</p>
-          <p class="note">{{ cons.fileHint }}</p>
-          <label class="button primary file">
-            Choose BIOS file
-            <input type="file" @change="onFile" />
-          </label>
-        </div>
-      </template>
-
-      <template v-else-if="view === 'emu' && cons.realEmulation">
-        <Ps1Emulator ref="emu" :bios="result?.data || current.data" :disc="disc" />
+      <template v-else-if="consoleId === 'ps1'">
+        <Ps1Screen ref="screen" :bios="bootBytes" :disc="disc" :region="region" />
         <div class="disc row">
           <span class="note">Disc:</span>
           <span v-if="disc" class="mono note">{{ discLabel }}</span>
-          <span v-else class="note">none (the BIOS opens its shell). Add your own game image to see the licensed screen.</span>
+          <span v-else class="note">none, so the BIOS opens its memory card / CD player menu. Add a game image for the licensed screen.</span>
           <label class="button small file">
             {{ disc ? 'Change' : 'Use my disc image' }}
-            <input type="file" multiple accept=".bin,.cue,.img,.pbp,.chd,.iso,.ccd,.m3u" @change="onDisc" />
+            <input type="file" multiple accept=".bin,.cue,.img,.iso" @change="onDisc" />
           </label>
           <button v-if="disc" class="small" @click="clearDisc">Remove</button>
         </div>
+        <p v-if="discError" class="note warn">{{ discError }}</p>
         <p class="note">
-          Runs the real corrupted BIOS in pcsx_rearmed via EmulatorJS (loaded from jsDelivr on first use). The disc image is read
-          locally and is not stored.
-        </p>
-        <p class="note warn">
-          A badly corrupted BIOS can lock up the emulator, and with it this tab. If that happens, reload the page: your BIOS
-          and settings are kept.
+          Pick the .cue and its .bin together, or a single .bin. The image is read locally and never stored. Emulation stops
+          when the BIOS hands over to the game.
         </p>
       </template>
 
-      <template v-else-if="feed">
-        <SceneCanvas :scene="scene" :feed="feed" :licensed="licensed" :sound="sound" :boot-key="bootKey" />
-        <div class="row opts">
-          <label v-if="cons.licensed" class="check"><input v-model="licensed" type="checkbox" /> Licensed disc inserted</label>
-          <label class="check"><input v-model="sound" type="checkbox" /> Sound</label>
-        </div>
-        <p class="note">
-          Simulated: a re-creation of the boot animation. Every part of it is wired to its own slice of your BIOS, and reads the
-          corrupted bytes there, so where you corrupt decides what breaks.
-          <template v-if="cons.realEmulation">Switch to "Real BIOS" to run the actual code.</template>
-        </p>
-      </template>
+      <div v-else class="empty">
+        <p>The PlayStation 2 core is still being built.</p>
+        <p class="note">You can already store and corrupt PS2 BIOS files here, and download the result.</p>
+      </div>
 
       <ByteMap
         v-if="current"
@@ -350,39 +321,23 @@ onMounted(async () => {
         <div class="row actions">
           <button class="primary" :disabled="!current || busy" @click="runCorruption">Corrupt &amp; boot</button>
           <button :disabled="!current || busy" @click="reroll">New seed</button>
-          <button :disabled="!result" @click="resetToClean">Clean boot</button>
+          <button :disabled="!current" @click="cleanBoot">Clean boot</button>
           <button :disabled="!result" @click="download">Download corrupted BIOS</button>
         </div>
-        <p class="note">Every corruption starts from your untouched original, so you can keep iterating.</p>
+        <p class="note">Every corruption starts from your untouched original.</p>
       </section>
     </aside>
   </div>
-
-  <section class="panel about">
-    <h3>How each console is rendered</h3>
-    <ul class="note">
-      <li><strong>PlayStation:</strong> the real BIOS runs in an emulator, so corruption changes the actual code. A simulated mode is there too.</li>
-      <li>
-        <strong>PlayStation 2, Xbox, Xbox 360:</strong> running these boot ROMs needs a full console emulator that doesn't exist
-        for the browser in a usable form. The boot is re-created instead and driven by your file's bytes. Download the corrupted
-        BIOS to try it for real in PCSX2 or xemu.
-      </li>
-      <li><strong>Xbox 360:</strong> there's no standalone BIOS; a NAND dump (or any file) is used as the data source.</li>
-    </ul>
-  </section>
 </template>
 
 <style scoped>
 .lead { max-width: 70ch; }
 .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 16px 0; }
-.tabs button.active, .seg button.active { border-color: var(--accent); color: var(--accent); }
+.tabs button.active { border-color: var(--accent); color: var(--accent); }
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
 @media (max-width: 900px) { .layout { grid-template-columns: minmax(0, 1fr); } }
 .stage { display: grid; gap: 12px; }
-.stage-head { justify-content: space-between; }
-.stage-head h2 { margin: 0; }
-.seg { display: inline-flex; gap: 4px; }
-.seg button { padding: 4px 10px; font-size: 0.85em; }
+.stage h2 { margin: 0; }
 .empty { aspect-ratio: 4 / 3; display: grid; place-content: center; text-align: center; background: #000; border-radius: 8px; padding: 16px; }
 .file { position: relative; overflow: hidden; justify-self: center; }
 .file input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
@@ -396,10 +351,6 @@ onMounted(async () => {
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .regions { gap: 4px; }
 .actions { margin-bottom: 8px; }
-.check { display: inline-flex; flex-direction: row; gap: 6px; align-items: center; color: var(--text); font-size: 0.9em; }
-.opts { gap: 16px; }
 .msg { margin: 8px 0 0; }
 .disc { gap: 8px; }
-.about { margin-top: 16px; }
-.about ul { margin: 0; padding-left: 18px; }
 </style>
