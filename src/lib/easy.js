@@ -83,10 +83,29 @@ export function score(checks, ref, expected) {
   return m;
 }
 
-// Runs probes on a small pool of workers. Resolves to { best, tried, passed,
-// ref }, where best is { settings, data, hits, metrics } or null, and ref is
-// the clean boot's probe, to pass back in next time.
-export async function easyCorrupt({ bios, consoleId, region, wasmUrl, makeWorker, ref, onProgress, signal, maxTries = 16, enough = 3, frames = 300 }) {
+// Whether a scored probe is good enough under the user's filters.
+// `refM` is the clean boot scored against itself.
+export function accepts(m, refM, { picture = false, sound = false } = {}) {
+  if (!m.ok) return false;
+  // "No black screen": a picture for most of the time the clean boot has one.
+  if (picture && m.visual < Math.max(0.15, 0.8 * refM.visual)) return false;
+  // "Must have sound": audible for at least half as long as the clean boot.
+  if (sound && m.sound < Math.max(0.1, 0.5 * refM.sound)) return false;
+  return true;
+}
+
+// The best unused cached candidate that passes the filters, or null.
+export function pickCached(cache, filters) {
+  const ok = cache.candidates.filter((c) => !c.used && accepts(c.metrics, cache.refMetrics, filters));
+  ok.sort((a, b) => b.metrics.score - a.metrics.score);
+  return ok[0] || null;
+}
+
+// Probes new candidates on a small pool of workers until `enough` of them
+// pass `accept` (or `maxTries` is reached), adding every probe to `cache`
+// ({ ref, refMetrics, candidates }, filled in on first use). Returns how many
+// were tried.
+export async function easySearch({ bios, consoleId, region, wasmUrl, makeWorker, cache, accept, onProgress, signal, maxTries = 16, enough = 3, frames = 300 }) {
   const giveUp = (refChecks) => {
     const first = refChecks.findIndex((c) => lit(c.grid) > 0.02 || c.loud > LOUD);
     return Math.max(150, (first < 0 ? 15 : first + 1) * 10 + 90);
@@ -120,41 +139,73 @@ export async function easyCorrupt({ bios, consoleId, region, wasmUrl, makeWorker
       workers.push(w);
     }
 
-    const rand = mulberry32((Math.random() * 2 ** 32) >>> 0);
-    let refChecks = ref?.checks;
-    if (!refChecks) {
+    if (!cache.ref) {
       onProgress?.({ phase: 'reference' });
-      refChecks = await run(workers[0], bios, frames);
-      if (!refChecks.length) {
-        if (signal?.aborted) return { best: null, tried: 0, passed: 0, ref: null };
-        throw new Error('the emulator could not run here');
-      }
+      const checks = await run(workers[0], bios, frames);
+      if (signal?.aborted) return 0;
+      if (!checks.length) throw new Error('the emulator could not run here');
+      cache.ref = checks;
+      cache.refMetrics = score(checks, checks, checks.length);
     }
-    const expected = refChecks.length || frames / 10;
+    const refChecks = cache.ref;
+    const expected = refChecks.length;
     const giveUpAt = giveUp(refChecks);
 
-    const results = [];
+    const rand = mulberry32((Math.random() * 2 ** 32) >>> 0);
     let tried = 0;
     let started = 0;
-    const passed = () => results.filter((r) => r.metrics.ok).length;
-    const done = () => signal?.aborted || started >= maxTries || passed() >= enough;
+    let found = 0;
+    const done = () => signal?.aborted || started >= maxTries || found >= enough;
     await Promise.all(
       workers.map(async (w) => {
         while (!done()) {
           started++;
           const settings = candidateSettings(consoleId, bios.length, rand);
-          const { data, hits } = corrupt(bios, settings);
-          const checks = await run(w, data, giveUpAt);
+          const checks = await run(w, corrupt(bios, settings).data, giveUpAt);
+          if (signal?.aborted) return; // a cut-short probe says nothing
           tried++;
-          results.push({ settings, data, hits, metrics: score(checks, refChecks, expected) });
-          onProgress?.({ phase: 'search', tried, maxTries, passed: passed() });
+          const metrics = score(checks, refChecks, expected);
+          cache.candidates.push({ settings, metrics, used: false });
+          if (accept(metrics)) found++;
+          onProgress?.({ phase: 'search', tried, maxTries, found });
         }
       }),
     );
-    results.sort((a, b) => b.metrics.ok - a.metrics.ok || b.metrics.score - a.metrics.score);
-    return { best: results[0] || null, tried, passed: passed(), ref: { checks: refChecks } };
+    return tried;
   } finally {
     signal?.removeEventListener('abort', cancel);
     workers.forEach((w) => w.terminate());
+  }
+}
+
+// Probe results are kept per BIOS and core build, so later clicks (and
+// visits) can reuse them. Only settings and scores are stored; the corrupted
+// bytes are rebuilt from the settings.
+const CACHE_PREFIX = 'corruptorfun.easy.';
+
+export function loadCache(key) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CACHE_PREFIX + key));
+    if (raw?.ref) {
+      raw.ref = raw.ref.map((c) => ({ loud: c.loud, grid: Uint8Array.from(atob(c.grid), (ch) => ch.charCodeAt(0)) }));
+      return raw;
+    }
+  } catch {
+    // fall through to an empty cache
+  }
+  return { ref: null, refMetrics: null, candidates: [] };
+}
+
+export function saveCache(key, cache) {
+  try {
+    // One BIOS's cache at a time is plenty; drop the others.
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(CACHE_PREFIX) && k !== CACHE_PREFIX + key) localStorage.removeItem(k);
+    }
+    const ref = cache.ref?.map((c) => ({ loud: c.loud, grid: btoa(String.fromCharCode(...c.grid)) }));
+    localStorage.setItem(CACHE_PREFIX + key, JSON.stringify({ ...cache, ref, candidates: cache.candidates.slice(-200) }));
+  } catch {
+    // The cache is a convenience only.
   }
 }

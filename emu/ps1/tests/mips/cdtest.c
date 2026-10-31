@@ -14,10 +14,11 @@ int main(void) {
   cmd(0x0A, 0, 0); check("init int3", wait_int(), 3); check("init int2", wait_int(), 2);
   cmd(0x01, 0, 0); check("getstat int3", wait_int(), 3);
   u8 p20 = 0x20; cmd(0x19, &p20, 1); check("test 20", wait_int(), 3); check("cd bios year", resp[0], 0x94);
-  cmd(0x1A, 0, 0); check("getid int3", wait_int(), 3);
+  cmd(0x1A, 0, 0);
   int f = wait_int();
-  if (f == 5) { check("getid no disc flags", resp[1], 0x40); puts_("no disc path\n"); }
+  if (f == 5) { check("getid no disc: lid open", resp[0] & 0x10, 0x10); check("getid no disc: not ready", resp[1], 0x80); puts_("no disc path\n"); }
   else {
+    check("getid int3", f, 3); f = wait_int();
     check("getid licensed int2", f, 2); check("getid S", resp[4], 'S'); 
     u8 mode = 0x80; cmd(0x0E, &mode, 1); check("setmode", wait_int(), 3);
     u8 loc[3] = {0x00, 0x02, 0x16}; cmd(0x02, loc, 3); check("setloc", wait_int(), 3);
