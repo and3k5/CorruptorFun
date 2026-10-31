@@ -94,15 +94,16 @@ impl Cpu {
         self.current_pc = self.pc;
 
         // BIOS putchar hooks (A0:3C, B0:3D) are mirrored to the TTY buffer for
-        // debugging. They don't change behaviour.
-        if self.pc == 0xA0 && self.regs[9] == 0x3C || self.pc == 0xB0 && self.regs[9] == 0x3D {
-            if self.tty.len() < 1 << 16 {
+        // debugging. They don't change behaviour. A0:43 is DoExecute, the
+        // hand-off to the game.
+        if self.pc & !0x10 == 0xA0 {
+            let f = self.regs[9];
+            if (self.pc == 0xA0 && f == 0x3C || self.pc == 0xB0 && f == 0x3D) && self.tty.len() < 1 << 16 {
                 self.tty.push(self.regs[4] as u8);
             }
-        }
-
-        if self.pc == 0xA0 && self.regs[9] == 0x43 {
-            self.game_started = true;
+            if self.pc == 0xA0 && f == 0x43 {
+                self.game_started = true;
+            }
         }
 
         if self.current_pc & 3 != 0 {

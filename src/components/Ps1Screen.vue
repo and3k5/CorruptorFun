@@ -1,6 +1,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import wasmUrl from '../wasm/ps1.wasm?url';
+import workletUrl from '../emu/ps1-audio.worklet.js?url&no-inline';
 
 // Runs the corrupted BIOS in our own PS1 core (Rust → WebAssembly) inside a
 // worker, draws its frames and plays its audio.
@@ -8,18 +9,24 @@ const props = defineProps({
   bios: { type: Object, required: true }, // corrupted Uint8Array
   disc: { type: Object, default: null }, // raw data track Uint8Array
   region: { type: String, default: 'E' },
+  // Float a small copy of the screen in the corner while it's scrolled away.
+  mini: { type: Boolean, default: false },
 });
 
 const canvas = ref(null);
+const holder = ref(null);
 const status = ref('Press Boot to run the BIOS.');
 const running = ref(false);
 const muted = ref(false);
+const offscreen = ref(false);
 let worker = null;
-let audio = null;
-let gain = null;
-let nextAudio = 0;
+let audio = null; // { ctx, node, gain } once the worklet is loaded
+let audioReady = null;
 let lastFrame = 0;
 let watchdog = 0;
+let pending = null; // newest frame not yet drawn
+let raf = 0;
+let observer = null;
 
 // Keyboard → PS1 pad bits (active high).
 const KEYS = {
@@ -38,36 +45,39 @@ function onKey(ev) {
   worker?.postMessage({ type: 'buttons', mask: buttons });
 }
 
-function draw(w, h, pixels) {
+function draw() {
+  raf = 0;
   const c = canvas.value;
-  if (!c) return;
-  if (c.width !== w || c.height !== h) {
-    c.width = w;
-    c.height = h;
+  const f = pending;
+  pending = null;
+  if (!c || !f) return;
+  if (c.width !== f.w || c.height !== f.h) {
+    c.width = f.w;
+    c.height = f.h;
   }
-  c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0);
+  c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(f.pixels), f.w, f.h), 0, 0);
 }
 
-function play(buf) {
-  if (!audio || muted.value) return;
-  const s = new Int16Array(buf);
-  const frames = s.length / 2;
-  if (!frames) return;
-  const b = audio.createBuffer(2, frames, 44100);
-  const l = b.getChannelData(0);
-  const r = b.getChannelData(1);
-  for (let i = 0; i < frames; i++) {
-    l[i] = s[2 * i] / 32768;
-    r[i] = s[2 * i + 1] / 32768;
-  }
-  const now = audio.currentTime;
-  // Keep latency bounded: resync if we've fallen behind or run far ahead.
-  if (nextAudio < now + 0.02 || nextAudio > now + 0.3) nextAudio = now + 0.05;
-  const src = audio.createBufferSource();
-  src.buffer = b;
-  src.connect(gain);
-  src.start(nextAudio);
-  nextAudio += b.duration;
+// Loads the audio worklet once. Must start from a click so the browser lets
+// the page make sound.
+function setupAudio() {
+  if (audioReady) return audioReady;
+  audioReady = (async () => {
+    try {
+      const ctx = new AudioContext({ sampleRate: 44100, latencyHint: 'interactive' });
+      ctx.resume();
+      await ctx.audioWorklet.addModule(workletUrl);
+      const node = new AudioWorkletNode(ctx, 'ps1-audio', { outputChannelCount: [2] });
+      const gain = ctx.createGain();
+      gain.gain.value = muted.value ? 0 : 1;
+      node.connect(gain).connect(ctx.destination);
+      audio = { ctx, node, gain };
+    } catch {
+      audio = null; // no sound, but the boot still runs
+    }
+    return audio;
+  })();
+  return audioReady;
 }
 
 function stop(text = 'Stopped.') {
@@ -78,36 +88,44 @@ function stop(text = 'Stopped.') {
   status.value = text;
 }
 
-function boot() {
+async function boot() {
   stop();
-  try {
-    audio = audio || new AudioContext({ sampleRate: 44100 });
-    gain = gain || audio.createGain();
-    gain.connect(audio.destination);
-    audio.resume();
-  } catch {
-    audio = null;
-  }
-  worker = new Worker(new URL('../emu/ps1.worker.js', import.meta.url), { type: 'module' });
-  worker.onmessage = (ev) => {
+  const ready = setupAudio();
+  audio?.ctx.resume();
+  // Copies, so the stored original stays untouched and we can transfer.
+  const bios = props.bios.slice().buffer;
+  const disc = props.disc ? props.disc.slice().buffer : null;
+  const w = new Worker(new URL('../emu/ps1.worker.js', import.meta.url), { type: 'module' });
+  worker = w;
+  running.value = true;
+  status.value = props.disc ? 'Booting with your disc…' : 'Booting with no disc…';
+  await ready;
+  if (worker !== w) return; // stopped or rebooted meanwhile
+  audio?.ctx.resume();
+  w.onmessage = (ev) => {
     const m = ev.data;
     if (m.type === 'frame') {
       lastFrame = performance.now();
-      draw(m.w, m.h, m.pixels);
-    } else if (m.type === 'audio') {
-      play(m.samples);
+      pending = m;
+      raf = raf || requestAnimationFrame(draw);
     } else if (m.type === 'game-started') {
       stop('The BIOS handed over to the game here. Only the boot is emulated, so it stops.');
     } else if (m.type === 'error') {
       stop(m.message);
     }
   };
-  // Copies, so the stored original stays untouched and we can transfer.
-  const bios = props.bios.slice().buffer;
-  const disc = props.disc ? props.disc.slice().buffer : null;
-  worker.postMessage({ type: 'start', wasmUrl: new URL(wasmUrl, location.href).href, bios, disc, region: props.region }, disc ? [bios, disc] : [bios]);
-  running.value = true;
-  status.value = props.disc ? 'Booting with your disc…' : 'Booting with no disc…';
+  // The worker posts audio straight to the audio thread.
+  let audioPort = null;
+  if (audio) {
+    const ch = new MessageChannel();
+    audio.node.port.postMessage('reset');
+    audio.node.port.postMessage({ port: ch.port1 }, [ch.port1]);
+    audioPort = ch.port2;
+  }
+  const transfer = [bios];
+  if (disc) transfer.push(disc);
+  if (audioPort) transfer.push(audioPort);
+  w.postMessage({ type: 'start', wasmUrl: new URL(wasmUrl, location.href).href, bios, disc, region: props.region, audioPort }, transfer);
   lastFrame = performance.now();
   watchdog = setInterval(() => {
     if (running.value && performance.now() - lastFrame > 4000) {
@@ -118,7 +136,11 @@ function boot() {
 
 function toggleMute() {
   muted.value = !muted.value;
-  if (gain) gain.gain.value = muted.value ? 0 : 1;
+  if (audio) audio.gain.gain.value = muted.value ? 0 : 1;
+}
+
+function backToScreen() {
+  holder.value?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 function snapshot() {
@@ -131,22 +153,29 @@ function snapshot() {
 onMounted(() => {
   window.addEventListener('keydown', onKey);
   window.addEventListener('keyup', onKey);
+  observer = new IntersectionObserver(([e]) => (offscreen.value = e.intersectionRatio < 0.35), { threshold: [0, 0.35, 1] });
+  observer.observe(holder.value);
 });
 onBeforeUnmount(() => {
   stop();
+  observer?.disconnect();
+  cancelAnimationFrame(raf);
   window.removeEventListener('keydown', onKey);
   window.removeEventListener('keyup', onKey);
-  audio?.close();
+  audio?.ctx.close();
 });
 
-defineExpose({ boot });
+defineExpose({ boot, stop });
 </script>
 
 <template>
   <div class="emu">
-    <div class="screen">
-      <canvas ref="canvas" width="320" height="240" aria-label="PlayStation output" />
-      <div v-if="!running" class="overlay note">{{ status }}</div>
+    <div ref="holder" class="holder">
+      <div class="screen" :class="{ mini: mini && running && offscreen }">
+        <canvas ref="canvas" width="320" height="240" aria-label="PlayStation output" />
+        <div v-if="!running" class="overlay note">{{ status }}</div>
+        <button v-if="mini && running && offscreen" class="back" aria-label="Scroll back to the screen" @click="backToScreen" />
+      </div>
     </div>
     <div class="row">
       <button class="primary" @click="boot">{{ running ? 'Reboot' : 'Boot' }}</button>
@@ -163,7 +192,13 @@ defineExpose({ boot });
 
 <style scoped>
 .emu { display: grid; gap: 8px; }
-.screen { position: relative; aspect-ratio: 4 / 3; background: #000; border-radius: 8px; overflow: hidden; }
+.holder { aspect-ratio: 4 / 3; }
+.screen { position: relative; width: 100%; height: 100%; background: #000; border-radius: 8px; overflow: hidden; }
+.screen.mini {
+  position: fixed; z-index: 50; right: 12px; bottom: 12px; width: min(46vw, 280px); height: auto; aspect-ratio: 4 / 3;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6); outline: 1px solid var(--line, #333);
+}
+.back { position: absolute; inset: 0; background: none; border: 0; padding: 0; cursor: pointer; }
 canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
 .overlay { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 16px; background: rgba(0, 0, 0, 0.55); }
 .keys { margin: 0; }

@@ -412,10 +412,13 @@ impl Gpu {
         let w = ((c[2] & 0x3FF) + 0xF) & !0xF;
         let h = (c[2] >> 16) & 0x1FF;
         for y in 0..h {
-            for x in 0..w {
-                let px = ((x0 + x) & 1023) as usize;
-                let py = ((y0 + y) & 511) as usize;
-                self.vram[py * VRAM_W + px] = col;
+            let row = ((y0 + y) & 511) as usize * VRAM_W;
+            if x0 + w <= VRAM_W as u32 {
+                self.vram[row + x0 as usize..row + (x0 + w) as usize].fill(col);
+            } else {
+                for x in 0..w {
+                    self.vram[row + ((x0 + x) & 1023) as usize] = col;
+                }
             }
         }
     }
@@ -525,37 +528,61 @@ impl Gpu {
             return;
         }
 
-        // Edge functions with a top-left rule.
-        let edge = |p: &Vertex, q: &Vertex, x: i32, y: i32| -> i64 {
-            (q.x - p.x) as i64 * (y - p.y) as i64 - (q.y - p.y) as i64 * (x - p.x) as i64
-        };
-        let bias = |p: &Vertex, q: &Vertex| -> i64 {
+        // Edge functions with a top-left rule, stepped incrementally. Each
+        // edge value is linear in x and y, and so is every attribute's
+        // weighted sum, so a row only needs additions.
+        let edge = |p: &Vertex, q: &Vertex, x: i32, y: i32| -> i32 { (q.x - p.x) * (y - p.y) - (q.y - p.y) * (x - p.x) };
+        let bias = |p: &Vertex, q: &Vertex| -> i32 {
             let top_left = (q.y < p.y) || (q.y == p.y && q.x > p.x);
             if top_left { 0 } else { -1 }
         };
         let bias0 = bias(&b, &c);
         let bias1 = bias(&c, &a);
         let bias2 = bias(&a, &b);
+        let (dx0, dx1, dx2) = (b.y - c.y, c.y - a.y, a.y - b.y);
+
+        // Attributes as 16.16 fixed point: value at the row start (exact),
+        // plus a per-pixel step.
+        let attrs: [(i32, i32, i32); 5] = [(a.r, b.r, c.r), (a.g, b.g, c.g), (a.b, b.b, c.b), (a.u, b.u, c.u), (a.v, b.v, c.v)];
+        let n_attr = if st.tex { 5 } else if st.shaded { 3 } else { 0 };
+        let mut step = [0i64; 5];
+        for (k, &(va, vb, vc)) in attrs.iter().enumerate().take(n_attr) {
+            let num = dx0 as i64 * va as i64 + dx1 as i64 * vb as i64 + dx2 as i64 * vc as i64;
+            step[k] = (num << 16) / area;
+        }
 
         let dither = self.texpage & (1 << 9) != 0 && (st.shaded || (st.tex && !st.raw));
         for y in y0..=y1 {
-            for x in x0..=x1 {
-                let w0 = edge(&b, &c, x, y);
-                let w1 = edge(&c, &a, x, y);
-                let w2 = edge(&a, &b, x, y);
-                if w0 + bias0 < 0 || w1 + bias1 < 0 || w2 + bias2 < 0 {
-                    continue;
+            // Solve each edge for the row's covered span instead of testing
+            // every pixel of the bounding box.
+            let mut lo = x0;
+            let mut hi = x1;
+            for (w, d) in [(edge(&b, &c, x0, y) + bias0, dx0), (edge(&c, &a, x0, y) + bias1, dx1), (edge(&a, &b, x0, y) + bias2, dx2)] {
+                if d > 0 {
+                    lo = lo.max(x0 - w.div_euclid(d));
+                } else if d < 0 {
+                    hi = hi.min(x0 + w.div_euclid(-d));
+                } else if w < 0 {
+                    hi = lo - 1;
                 }
-                let interp = |va: i32, vb: i32, vc: i32| -> i32 {
-                    ((w0 * va as i64 + w1 * vb as i64 + w2 * vc as i64) / area) as i32
-                };
-                let (r, g, bb) = if st.shaded {
-                    (interp(a.r, b.r, c.r), interp(a.g, b.g, c.g), interp(a.b, b.b, c.b))
-                } else {
-                    (a.r, a.g, a.b)
-                };
-                let (u, v) = if st.tex { (interp(a.u, b.u, c.u), interp(a.v, b.v, c.v)) } else { (0, 0) };
+            }
+            if lo > hi {
+                continue;
+            }
+            let (w0, w1, w2) = (edge(&b, &c, lo, y), edge(&c, &a, lo, y), edge(&a, &b, lo, y));
+            let mut acc = [0i64; 5];
+            for (k, &(va, vb, vc)) in attrs.iter().enumerate().take(n_attr) {
+                let num = w0 as i64 * va as i64 + w1 as i64 * vb as i64 + w2 as i64 * vc as i64;
+                acc[k] = (num << 16) / area;
+            }
+            for x in lo..=hi {
+                let at = |k: usize| (acc[k] >> 16) as i32;
+                let (r, g, bb) = if st.shaded { (at(0), at(1), at(2)) } else { (a.r, a.g, a.b) };
+                let (u, v) = if st.tex { (at(3), at(4)) } else { (0, 0) };
                 self.plot(x, y, r, g, bb, u, v, st, dither);
+                for k in 0..5 {
+                    acc[k] += step[k];
+                }
             }
         }
     }
@@ -586,6 +613,7 @@ impl Gpu {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     fn plot(&mut self, x: i32, y: i32, r: i32, g: i32, b: i32, u: i32, v: i32, st: &Shade, dither: bool) {
         let idx = (y as usize & 511) * VRAM_W + (x as usize & 1023);
         if self.check_mask && self.vram[idx] & 0x8000 != 0 {

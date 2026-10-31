@@ -20,9 +20,18 @@ keep re-corrupting the untouched original.
 - **PlayStation 2:** in progress. You can already store, corrupt and download
   PS2 BIOS files.
 
-Corruption engines: bit flip, random byte, nudge, XOR mask, smear, block shift,
-zero out. Pick a byte range (or a preset region), a hit count or "every Nth
-byte", and a seed.
+**Easy corrupt** (PS1) boots a batch of random corruptions headlessly in
+background workers (`src/emu/ps1-probe.worker.js`), samples what each one shows
+and plays, and boots the best one that still has picture or sound and looks
+different from the clean boot (`src/lib/easy.js`). The settings it picked land
+in the Advanced form.
+
+Advanced corruption engines: bit flip, random byte, nudge, XOR mask, smear,
+block shift, zero out. Pick a byte range (or a preset region), a hit count or
+"every Nth byte", and a seed.
+
+On narrow screens you can turn on a mini screen that floats in the corner
+while you scroll down to the options.
 
 ## Development
 
@@ -42,7 +51,9 @@ npm run build   # static site in dist/
 load/branch delay slots and exceptions, GTE, GPU software rasterizer, DMA,
 timers, interrupt controller, CD-ROM controller, controller port and an SPU
 mixer. It runs in a Web Worker (`src/emu/ps1.worker.js`), so a BIOS that
-crashes or hangs can't freeze the page.
+crashes or hangs can't freeze the page. The worker paces frames against the
+wall clock (catching up by skipping pictures, not slowing down) and sends audio
+straight to an AudioWorklet (`src/emu/ps1-audio.worklet.js`).
 
 `emu/ps1/src/bin/cli.rs` is a headless runner for debugging:
 

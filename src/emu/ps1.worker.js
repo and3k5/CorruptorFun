@@ -1,11 +1,19 @@
 // Runs the PS1 WebAssembly core off the main thread. A corrupted BIOS can't
 // freeze the page this way, and the page can always kill a boot by
 // terminating the worker.
+//
+// Frames are paced against the wall clock: if the device falls behind, the
+// worker runs extra frames without building their pictures to catch up, so
+// the boot (and its sound) keeps real speed instead of slowing down.
+
+const MAX_CATCH_UP = 4; // frames per tick before we give up and slow down
 
 let wasm = null;
 let mem = () => new Uint8Array(wasm.memory.buffer);
 let timer = 0;
 let running = false;
+let audioPort = null;
+let nextAt = 0;
 
 function copyIn(bytes) {
   const ptr = wasm.alloc(bytes.length);
@@ -13,13 +21,32 @@ function copyIn(bytes) {
   return ptr;
 }
 
-function loop() {
+function flushAudio() {
+  const n = wasm.ps1_audio_len();
+  if (!n) return;
+  const samples = new Int16Array(wasm.memory.buffer, wasm.ps1_audio_ptr(), n).slice();
+  wasm.ps1_audio_clear();
+  if (audioPort) audioPort.postMessage(samples.buffer, [samples.buffer]);
+}
+
+function tick() {
   if (!running) return;
-  const pal = wasm.ps1_is_pal() === 1;
-  const frameMs = 1000 / (pal ? 50 : 60);
-  const t0 = performance.now();
+  const frameMs = 1000 / (wasm.ps1_is_pal() === 1 ? 50 : 60);
+  const now = performance.now();
+  let due = Math.floor((now - nextAt) / frameMs) + 1;
+  if (due > MAX_CATCH_UP) {
+    // Too far behind to catch up: accept the slowdown.
+    nextAt = now;
+    due = MAX_CATCH_UP;
+  }
   try {
-    wasm.ps1_run_frame();
+    for (let i = 0; i < due; i++) {
+      wasm.ps1_set_render(i === due - 1 ? 1 : 0);
+      wasm.ps1_run_frame();
+      flushAudio();
+      nextAt += frameMs;
+      if (wasm.ps1_game_started()) break;
+    }
   } catch (e) {
     running = false;
     postMessage({ type: 'error', message: `The emulator crashed: ${e.message}` });
@@ -30,26 +57,19 @@ function loop() {
   const pixels = mem().slice(wasm.ps1_frame_ptr(), wasm.ps1_frame_ptr() + w * h * 4);
   postMessage({ type: 'frame', w, h, pixels: pixels.buffer }, [pixels.buffer]);
 
-  const n = wasm.ps1_audio_len();
-  if (n) {
-    const ptr = wasm.ps1_audio_ptr();
-    const samples = new Int16Array(wasm.memory.buffer, ptr, n).slice();
-    wasm.ps1_audio_clear();
-    postMessage({ type: 'audio', samples: samples.buffer }, [samples.buffer]);
-  }
   if (wasm.ps1_game_started()) {
     running = false;
     postMessage({ type: 'game-started' });
     return;
   }
-  const spent = performance.now() - t0;
-  timer = setTimeout(loop, Math.max(0, frameMs - spent));
+  timer = setTimeout(tick, Math.max(0, nextAt - performance.now()));
 }
 
 onmessage = async (ev) => {
   const msg = ev.data;
   if (msg.type === 'start') {
     try {
+      audioPort = msg.audioPort || null;
       const { instance } = await WebAssembly.instantiateStreaming(fetch(msg.wasmUrl), {});
       wasm = instance.exports;
       const bios = new Uint8Array(msg.bios);
@@ -60,7 +80,8 @@ onmessage = async (ev) => {
       }
       wasm.ps1_set_region(msg.region.charCodeAt(0));
       running = true;
-      loop();
+      nextAt = performance.now();
+      tick();
     } catch (e) {
       postMessage({ type: 'error', message: `Could not start the emulator: ${e.message}` });
     }

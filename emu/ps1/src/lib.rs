@@ -23,11 +23,13 @@ pub struct System {
     pub frame: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// When false, `run_frame` skips building the RGBA frame (headless runs).
+    pub render: bool,
 }
 
 impl System {
     pub fn new(bios: Vec<u8>) -> Self {
-        System { cpu: Cpu::new(), bus: Bus::new(bios), frame: Vec::new(), width: 320, height: 240 }
+        System { cpu: Cpu::new(), bus: Bus::new(bios), frame: Vec::new(), width: 320, height: 240, render: true }
     }
 
     /// Runs until the GPU finishes a frame (or a safety cap of cycles).
@@ -48,6 +50,12 @@ impl System {
         if acc > 0 {
             self.bus.tick(acc);
         }
+        if self.render {
+            self.render_frame();
+        }
+    }
+
+    pub fn render_frame(&mut self) {
         let (w, h) = self.bus.gpu.render(&mut self.frame);
         self.width = w;
         self.height = h;
@@ -135,6 +143,28 @@ pub extern "C" fn ps1_set_region(r: u8) {
 #[no_mangle]
 pub extern "C" fn ps1_run_frame() {
     sys().run_frame();
+}
+
+/// 0 skips building frames in `ps1_run_frame` (used when searching for
+/// corruptions); `ps1_render` then builds one on demand.
+#[no_mangle]
+pub extern "C" fn ps1_set_render(on: u32) {
+    sys().render = on != 0;
+}
+
+#[no_mangle]
+pub extern "C" fn ps1_render() {
+    sys().render_frame();
+}
+
+/// Side-loads a PS-X EXE from a buffer from `alloc(len)`. Returns 1 on success.
+///
+/// # Safety
+/// `ptr` must come from `alloc(len)` and not be used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn ps1_load_exe(ptr: *mut u8, len: usize) -> u32 {
+    let exe = Vec::from_raw_parts(ptr, len, len);
+    sys().load_exe(&exe) as u32
 }
 
 #[no_mangle]
