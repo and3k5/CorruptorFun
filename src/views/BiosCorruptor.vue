@@ -4,7 +4,7 @@ import { CONSOLES, CONSOLE_LIST, detectConsole, ps1Region } from '../lib/console
 import { DEFAULT_SETTINGS, ENGINES, clampRange, corrupt } from '../lib/corrupt.js';
 import { deleteBios, listBios, loadBios, saveBios } from '../lib/storage.js';
 import { loadDisc } from '../lib/disc.js';
-import { easyCorrupt } from '../lib/easy.js';
+import { accepts, easySearch, loadCache, pickCached, saveCache } from '../lib/easy.js';
 import wasmUrl from '../wasm/ps1.wasm?url';
 import ByteMap from '../components/ByteMap.vue';
 import Ps1Screen from '../components/Ps1Screen.vue';
@@ -35,8 +35,13 @@ const discError = ref('');
 const screen = ref(null);
 const mini = ref(!!prefs.mini);
 const advancedOpen = ref(prefs.advancedOpen ?? true);
-const easy = reactive({ running: false, text: '', abort: null });
-let easyRef = null; // { key, checks } of the clean boot, reused between searches
+const easy = reactive({ running: false, text: '', abort: null, saved: 0 });
+const easyFilters = reactive({ picture: prefs.easyFilters?.picture ?? true, sound: prefs.easyFilters?.sound ?? false });
+// Probe results for the current BIOS, reused across clicks and visits. The
+// key includes the core build, since a different core boots differently.
+const coreTag = wasmUrl.split('/').pop();
+let easyCache = null;
+let easyCacheKey = '';
 
 const cons = computed(() => CONSOLES[consoleId.value]);
 const forConsole = computed(() => library.value.filter((b) => b.consoleId === consoleId.value));
@@ -50,6 +55,7 @@ function savePrefs() {
   all.settings = { ...(all.settings || {}), [consoleId.value]: { ...settings } };
   all.mini = mini.value;
   all.advancedOpen = advancedOpen.value;
+  all.easyFilters = { ...easyFilters };
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(all));
   } catch {
@@ -58,6 +64,10 @@ function savePrefs() {
 }
 watch(settings, savePrefs, { deep: true });
 watch([mini, advancedOpen], savePrefs);
+watch(easyFilters, () => {
+  savePrefs();
+  countSaved();
+});
 
 async function refreshLibrary() {
   try {
@@ -147,45 +157,90 @@ function reroll() {
 
 const hex4 = (n) => '0x' + n.toString(16).toUpperCase().padStart(5, '0');
 
+function easyCacheNow() {
+  const key = `${current.value.id || current.value.name}:${region.value}:${coreTag}`;
+  if (key !== easyCacheKey) {
+    easyCache = loadCache(key);
+    easyCacheKey = key;
+  }
+  return easyCache;
+}
+
+function countSaved() {
+  const c = current.value && consoleId.value === 'ps1' ? easyCacheNow() : null;
+  easy.saved = c?.refMetrics ? c.candidates.filter((x) => !x.used && accepts(x.metrics, c.refMetrics, easyFilters)).length : 0;
+}
+watch(current, countSaved);
+
+function describe(c) {
+  const what = `${ENGINES[c.settings.engine].label} × ${c.settings.count} in ${hex4(c.settings.start)}–${hex4(c.settings.end)}`;
+  const m = c.metrics;
+  const shows = [m.visual >= 0.15 && 'picture', m.sound >= 0.1 && 'sound'].filter(Boolean).join(' and ');
+  return `${what}${shows ? ` (${shows})` : ''}`;
+}
+
+function useCandidate(c) {
+  c.used = true;
+  saveCache(easyCacheKey, easyCache);
+  countSaved();
+  Object.assign(settings, c.settings);
+  result.value = corrupt(current.value.data, c.settings);
+  bootNow();
+}
+
 async function runEasy() {
   if (!current.value || easy.running) return;
+  const cache = easyCacheNow();
+  const filters = { ...easyFilters };
+  const cached = pickCached(cache, filters);
+  if (cached) {
+    useCandidate(cached);
+    easy.text = `Picked ${describe(cached)} from earlier searches. Its settings are in Advanced below.`;
+    return;
+  }
+
   const ctl = new AbortController();
-  Object.assign(easy, { running: true, abort: ctl, text: 'Booting the clean BIOS once to learn what it looks like…' });
+  Object.assign(easy, { running: true, abort: ctl, text: cache.ref ? 'Searching…' : 'Booting the clean BIOS once to learn what it looks like…' });
   screen.value?.stop?.();
-  const key = `${current.value.id || current.value.name}:${region.value}`;
   try {
-    const out = await easyCorrupt({
+    const tried = await easySearch({
       bios: current.value.data,
       consoleId: consoleId.value,
       region: region.value,
       wasmUrl: new URL(wasmUrl, location.href).href,
       makeWorker: () => new Worker(new URL('../emu/ps1-probe.worker.js', import.meta.url), { type: 'module' }),
-      ref: easyRef?.key === key ? easyRef : null,
+      cache,
+      accept: (m) => accepts(m, cache.refMetrics, filters),
       signal: ctl.signal,
       onProgress: (p) => {
-        if (p.phase === 'search') easy.text = `Tried ${p.tried} of up to ${p.maxTries} corruptions, ${p.passed} still boot into something new…`;
+        if (p.phase === 'search') easy.text = `Tried ${p.tried} of up to ${p.maxTries} corruptions, ${p.found} fit…`;
       },
     });
-    if (out.ref) easyRef = { key, checks: out.ref.checks };
-    const best = out.best;
-    if (!best) {
-      easy.text = ctl.signal.aborted ? 'Stopped.' : 'Could not test any corruption.';
+    saveCache(easyCacheKey, cache);
+    if (ctl.signal.aborted) {
+      easy.text = 'Stopped. What was tested so far is saved.';
       return;
     }
-    Object.assign(settings, best.settings);
-    result.value = { data: best.data, hits: best.hits };
-    const what = `${ENGINES[best.settings.engine].label} × ${best.settings.count} in ${hex4(best.settings.start)}–${hex4(best.settings.end)}`;
-    const m = best.metrics;
-    const shows = [m.visual >= 0.15 && 'picture', m.sound >= 0.1 && 'sound'].filter(Boolean).join(' and ');
-    easy.text = m.ok
-      ? `Picked ${what} (${shows || 'some output'}) after ${out.tried} tries. Its settings are in Advanced below.`
-      : `None of ${out.tried} tries both booted and looked different, so here's the liveliest: ${what}. Try again for another batch.`;
-    bootNow();
+    const pick = pickCached(cache, filters);
+    if (pick) {
+      useCandidate(pick);
+      easy.text = `Picked ${describe(pick)} after ${tried} tries. Its settings are in Advanced below.`;
+      return;
+    }
+    // Nothing fits the filters: fall back to the liveliest one not used yet.
+    const rest = cache.candidates.filter((c) => !c.used).sort((a, b) => b.metrics.score - a.metrics.score);
+    if (!rest.length) {
+      easy.text = 'Could not test any corruption.';
+      return;
+    }
+    useCandidate(rest[0]);
+    easy.text = `None of ${tried} tries fit the boxes ticked above, so here's the liveliest: ${describe(rest[0])}. Try again for another batch.`;
   } catch (e) {
     easy.text = `Easy corrupt failed: ${e.message}`;
   } finally {
     easy.running = false;
     easy.abort = null;
+    countSaved();
   }
 }
 
@@ -350,8 +405,13 @@ onMounted(async () => {
             </button>
             <button v-if="easy.running" @click="stopEasy">Stop</button>
           </div>
+          <div class="row filters">
+            <label class="check note"><input v-model="easyFilters.picture" type="checkbox" /> No black screen</label>
+            <label class="check note"><input v-model="easyFilters.sound" type="checkbox" /> Must have sound</label>
+          </div>
           <p class="note">
             {{ easy.text || 'Tries a batch of corruptions in the background and boots one that still shows or plays something, and looks different from the clean boot.' }}
+            <template v-if="easy.saved && !easy.running"> {{ easy.saved }} more found {{ easy.saved === 1 ? 'is' : 'are' }} saved, so the next {{ easy.saved === 1 ? 'click is' : 'clicks are' }} instant.</template>
           </p>
         </div>
         <details :open="advancedOpen" @toggle="advancedOpen = $event.target.open">
@@ -434,6 +494,7 @@ onMounted(async () => {
 .disc { gap: 8px; }
 .check { display: flex; gap: 8px; align-items: center; }
 .easy { display: grid; gap: 6px; margin-bottom: 12px; }
+.filters { gap: 14px; }
 .easy .big { font-size: 1.05rem; padding: 10px 18px; }
 details { margin-bottom: 12px; border-top: 1px solid var(--line, #333); padding-top: 10px; }
 summary { cursor: pointer; margin-bottom: 10px; font-weight: 600; }

@@ -1,6 +1,6 @@
 //! CD-ROM controller (HLE of the drive's microcontroller).
 //!
-//! Supports no disc (the BIOS opens its shell) and a single-track Mode 2
+//! Supports no disc (reported as an open lid, so the BIOS opens its menu) and a single-track Mode 2
 //! data disc image in raw 2352-byte sectors (the licensed boot path).
 
 use std::collections::VecDeque;
@@ -57,7 +57,7 @@ impl Cdrom {
             int_flag: 0,
             queue: VecDeque::new(),
             busy: false,
-            stat: 0,
+            stat: 0x10,
             mode: 0,
             setloc: 0,
             pos: 0,
@@ -72,7 +72,14 @@ impl Cdrom {
 
     pub fn set_disc(&mut self, image: Option<Vec<u8>>) {
         self.disc = image;
-        self.stat = if self.disc.is_some() { 0x02 } else { 0x00 };
+        self.stat = self.idle_stat();
+    }
+
+    /// Drive status at rest: motor on with a disc; with no disc the drive
+    /// reports its shell (lid) as open, which is how the BIOS decides to go
+    /// to its menu instead of waiting for a disc.
+    fn idle_stat(&self) -> u8 {
+        if self.disc.is_some() { 0x02 } else { 0x10 }
     }
 
     fn sectors(&self) -> u32 {
@@ -165,8 +172,10 @@ impl Cdrom {
         match cmd {
             0x01 => {
                 self.ack();
-                // Shell-open flag clears once read.
-                self.stat &= !0x10;
+                // The shell-open flag clears once read, if the lid is shut.
+                if has_disc {
+                    self.stat &= !0x10;
+                }
             }
             0x02 => {
                 if p.len() >= 3 {
@@ -213,7 +222,7 @@ impl Cdrom {
                 self.ack();
                 self.mode = 0;
                 self.reading = false;
-                self.stat = if has_disc { 0x02 } else { 0x00 };
+                self.stat = self.idle_stat();
                 let s = self.stat;
                 self.push(SECOND_RESPONSE, 2, vec![s]);
             }
@@ -282,8 +291,7 @@ impl Cdrom {
             }
             0x1A => {
                 if !has_disc {
-                    self.ack();
-                    self.push(SECOND_RESPONSE, 5, vec![0x08, 0x40, 0, 0, 0, 0, 0, 0]);
+                    self.error(0x80);
                 } else {
                     self.ack();
                     let s = self.stat;

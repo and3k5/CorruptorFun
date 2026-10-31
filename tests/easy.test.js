@@ -41,3 +41,27 @@ test('a boot that died early counts the missing time as dead', () => {
   const m = score(run(3, grid(140)), ref, 36);
   assert.equal(m.alive, false);
 });
+
+test('filters: no black screen and must have sound', async () => {
+  const { accepts } = await import('../src/lib/easy.js');
+  const ref = run(30, grid(60), 0.01);
+  const refM = score(ref, ref, 30);
+  const silent = score(run(30, grid(140)), ref, 30);
+  const halfBlack = score([...run(10, grid(140), 0.01), ...run(20, grid(0), 0.01)], ref, 30);
+  assert.equal(accepts(silent, refM, {}), true);
+  assert.equal(accepts(silent, refM, { sound: true }), false);
+  assert.equal(accepts(halfBlack, refM, {}), true);
+  assert.equal(accepts(halfBlack, refM, { picture: true }), false);
+});
+
+test('cached picks skip used and filtered-out candidates', async () => {
+  const { pickCached } = await import('../src/lib/easy.js');
+  const ref = run(30, grid(60), 0.01);
+  const cache = { ref, refMetrics: score(ref, ref, 30), candidates: [] };
+  const add = (checks, used = false) => cache.candidates.push({ settings: { seed: cache.candidates.length }, metrics: score(checks, ref, 30), used });
+  add(run(30, grid(140), 0.01), true); // best, but used
+  add(run(30, grid(140))); // silent
+  add(run(30, grid(0))); // dead
+  assert.equal(pickCached(cache, {}).settings.seed, 1);
+  assert.equal(pickCached(cache, { sound: true }), null);
+});
