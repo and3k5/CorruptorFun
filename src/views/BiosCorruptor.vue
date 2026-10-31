@@ -1,9 +1,11 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, shallowRef, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import { CONSOLES, CONSOLE_LIST, detectConsole, ps1Region } from '../lib/consoles.js';
 import { DEFAULT_SETTINGS, ENGINES, clampRange, corrupt } from '../lib/corrupt.js';
 import { deleteBios, listBios, loadBios, saveBios } from '../lib/storage.js';
 import { loadDisc } from '../lib/disc.js';
+import { easyCorrupt } from '../lib/easy.js';
+import wasmUrl from '../wasm/ps1.wasm?url';
 import ByteMap from '../components/ByteMap.vue';
 import Ps1Screen from '../components/Ps1Screen.vue';
 
@@ -31,6 +33,10 @@ const disc = shallowRef(null);
 const discLabel = ref('');
 const discError = ref('');
 const screen = ref(null);
+const mini = ref(!!prefs.mini);
+const advancedOpen = ref(prefs.advancedOpen ?? true);
+const easy = reactive({ running: false, text: '', abort: null });
+let easyRef = null; // { key, checks } of the clean boot, reused between searches
 
 const cons = computed(() => CONSOLES[consoleId.value]);
 const forConsole = computed(() => library.value.filter((b) => b.consoleId === consoleId.value));
@@ -42,6 +48,8 @@ function savePrefs() {
   const all = readPrefs();
   all.consoleId = consoleId.value;
   all.settings = { ...(all.settings || {}), [consoleId.value]: { ...settings } };
+  all.mini = mini.value;
+  all.advancedOpen = advancedOpen.value;
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(all));
   } catch {
@@ -49,6 +57,7 @@ function savePrefs() {
   }
 }
 watch(settings, savePrefs, { deep: true });
+watch([mini, advancedOpen], savePrefs);
 
 async function refreshLibrary() {
   try {
@@ -135,6 +144,56 @@ function reroll() {
   settings.seed = Math.floor(Math.random() * 1e9);
   runCorruption();
 }
+
+const hex4 = (n) => '0x' + n.toString(16).toUpperCase().padStart(5, '0');
+
+async function runEasy() {
+  if (!current.value || easy.running) return;
+  const ctl = new AbortController();
+  Object.assign(easy, { running: true, abort: ctl, text: 'Booting the clean BIOS once to learn what it looks like…' });
+  screen.value?.stop?.();
+  const key = `${current.value.id || current.value.name}:${region.value}`;
+  try {
+    const out = await easyCorrupt({
+      bios: current.value.data,
+      consoleId: consoleId.value,
+      region: region.value,
+      wasmUrl: new URL(wasmUrl, location.href).href,
+      makeWorker: () => new Worker(new URL('../emu/ps1-probe.worker.js', import.meta.url), { type: 'module' }),
+      ref: easyRef?.key === key ? easyRef : null,
+      signal: ctl.signal,
+      onProgress: (p) => {
+        if (p.phase === 'search') easy.text = `Tried ${p.tried} of up to ${p.maxTries} corruptions, ${p.passed} still boot into something new…`;
+      },
+    });
+    if (out.ref) easyRef = { key, checks: out.ref.checks };
+    const best = out.best;
+    if (!best) {
+      easy.text = ctl.signal.aborted ? 'Stopped.' : 'Could not test any corruption.';
+      return;
+    }
+    Object.assign(settings, best.settings);
+    result.value = { data: best.data, hits: best.hits };
+    const what = `${ENGINES[best.settings.engine].label} × ${best.settings.count} in ${hex4(best.settings.start)}–${hex4(best.settings.end)}`;
+    const m = best.metrics;
+    const shows = [m.visual >= 0.15 && 'picture', m.sound >= 0.1 && 'sound'].filter(Boolean).join(' and ');
+    easy.text = m.ok
+      ? `Picked ${what} (${shows || 'some output'}) after ${out.tried} tries. Its settings are in Advanced below.`
+      : `None of ${out.tried} tries both booted and looked different, so here's the liveliest: ${what}. Try again for another batch.`;
+    bootNow();
+  } catch (e) {
+    easy.text = `Easy corrupt failed: ${e.message}`;
+  } finally {
+    easy.running = false;
+    easy.abort = null;
+  }
+}
+
+function stopEasy() {
+  easy.abort?.abort();
+}
+
+onBeforeUnmount(stopEasy);
 
 function cleanBoot() {
   result.value = null;
@@ -225,7 +284,7 @@ onMounted(async () => {
       </div>
 
       <template v-else-if="consoleId === 'ps1'">
-        <Ps1Screen ref="screen" :bios="bootBytes" :disc="disc" :region="region" />
+        <Ps1Screen ref="screen" :bios="bootBytes" :disc="disc" :region="region" :mini="mini" />
         <div class="disc row">
           <span class="note">Disc:</span>
           <span v-if="disc" class="mono note">{{ discLabel }}</span>
@@ -237,6 +296,10 @@ onMounted(async () => {
           <button v-if="disc" class="small" @click="clearDisc">Remove</button>
         </div>
         <p v-if="discError" class="note warn">{{ discError }}</p>
+        <label class="check note">
+          <input v-model="mini" type="checkbox" />
+          Keep a mini screen in the corner while I scroll down to the options
+        </label>
         <p class="note">
           Pick the .cue and its .bin together, or a single .bin. The image is read locally and never stored. Emulation stops
           when the BIOS hands over to the game.
@@ -280,47 +343,63 @@ onMounted(async () => {
 
       <section class="panel">
         <h3>Corruption</h3>
-        <div class="form">
-          <label>
-            Engine
-            <select v-model="settings.engine">
-              <option v-for="(e, id) in ENGINES" :key="id" :value="id">{{ e.label }}</option>
-            </select>
-            <span class="note">{{ ENGINES[settings.engine].help }}</span>
-          </label>
-          <label v-if="['increment', 'xor', 'smear', 'shift'].includes(settings.engine)">
-            {{ settings.engine === 'xor' ? 'Mask' : settings.engine === 'increment' ? 'Amount' : 'Block length' }}
-            <input v-model.number="settings.amount" type="number" min="1" max="65535" />
-          </label>
-          <div class="two">
-            <label>
-              Hits
-              <select v-model="settings.mode">
-                <option value="count">Random count</option>
-                <option value="every">Every Nth byte</option>
-              </select>
-            </label>
-            <label v-if="settings.mode === 'count'">
-              Count
-              <input v-model.number="settings.count" type="number" min="0" max="1000000" />
-            </label>
-            <label v-else>
-              Every N
-              <input v-model.number="settings.every" type="number" min="1" />
-            </label>
+        <div v-if="consoleId === 'ps1'" class="easy">
+          <div class="row">
+            <button class="primary big" :disabled="!current || busy || easy.running" @click="runEasy">
+              {{ easy.running ? 'Searching…' : 'Easy corrupt' }}
+            </button>
+            <button v-if="easy.running" @click="stopEasy">Stop</button>
           </div>
-          <div class="two">
-            <label>Start <input v-model.lazy="startText" class="mono" placeholder="0x0" /></label>
-            <label>End <input v-model.lazy="endText" class="mono" placeholder="end of file" /></label>
-          </div>
-          <div class="row regions">
-            <button v-for="r in cons.regions" :key="r.label" class="small" @click="applyRegion(r)">{{ r.label }}</button>
-          </div>
-          <label>Seed <input v-model.number="settings.seed" type="number" /></label>
+          <p class="note">
+            {{ easy.text || 'Tries a batch of corruptions in the background and boots one that still shows or plays something, and looks different from the clean boot.' }}
+          </p>
         </div>
+        <details :open="advancedOpen" @toggle="advancedOpen = $event.target.open">
+          <summary>Advanced</summary>
+          <div class="form">
+            <label>
+              Engine
+              <select v-model="settings.engine">
+                <option v-for="(e, id) in ENGINES" :key="id" :value="id">{{ e.label }}</option>
+              </select>
+              <span class="note">{{ ENGINES[settings.engine].help }}</span>
+            </label>
+            <label v-if="['increment', 'xor', 'smear', 'shift'].includes(settings.engine)">
+              {{ settings.engine === 'xor' ? 'Mask' : settings.engine === 'increment' ? 'Amount' : 'Block length' }}
+              <input v-model.number="settings.amount" type="number" min="1" max="65535" />
+            </label>
+            <div class="two">
+              <label>
+                Hits
+                <select v-model="settings.mode">
+                  <option value="count">Random count</option>
+                  <option value="every">Every Nth byte</option>
+                </select>
+              </label>
+              <label v-if="settings.mode === 'count'">
+                Count
+                <input v-model.number="settings.count" type="number" min="0" max="1000000" />
+              </label>
+              <label v-else>
+                Every N
+                <input v-model.number="settings.every" type="number" min="1" />
+              </label>
+            </div>
+            <div class="two">
+              <label>Start <input v-model.lazy="startText" class="mono" placeholder="0x0" /></label>
+              <label>End <input v-model.lazy="endText" class="mono" placeholder="end of file" /></label>
+            </div>
+            <div class="row regions">
+              <button v-for="r in cons.regions" :key="r.label" class="small" @click="applyRegion(r)">{{ r.label }}</button>
+            </div>
+            <label>Seed <input v-model.number="settings.seed" type="number" /></label>
+          </div>
+          <div class="row actions">
+            <button class="primary" :disabled="!current || busy" @click="runCorruption">Corrupt &amp; boot</button>
+            <button :disabled="!current || busy" @click="reroll">New seed</button>
+          </div>
+        </details>
         <div class="row actions">
-          <button class="primary" :disabled="!current || busy" @click="runCorruption">Corrupt &amp; boot</button>
-          <button :disabled="!current || busy" @click="reroll">New seed</button>
           <button :disabled="!current" @click="cleanBoot">Clean boot</button>
           <button :disabled="!result" @click="download">Download corrupted BIOS</button>
         </div>
@@ -353,4 +432,9 @@ onMounted(async () => {
 .actions { margin-bottom: 8px; }
 .msg { margin: 8px 0 0; }
 .disc { gap: 8px; }
+.check { display: flex; gap: 8px; align-items: center; }
+.easy { display: grid; gap: 6px; margin-bottom: 12px; }
+.easy .big { font-size: 1.05rem; padding: 10px 18px; }
+details { margin-bottom: 12px; border-top: 1px solid var(--line, #333); padding-top: 10px; }
+summary { cursor: pointer; margin-bottom: 10px; font-weight: 600; }
 </style>
