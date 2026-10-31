@@ -61,6 +61,11 @@ impl Spu {
         self.regs[off >> 1]
     }
 
+    /// Voices currently sounding, for the debug report.
+    pub fn active_voices(&self) -> usize {
+        self.voices.iter().filter(|v| !matches!(v.phase, Phase::Off)).count()
+    }
+
     pub fn read16(&self, p: u32) -> u16 {
         let off = (p - 0x1F80_1C00) as usize & 0x3FE;
         match off {

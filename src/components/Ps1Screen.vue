@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import wasmUrl from '../wasm/ps1.wasm?url';
 import workletUrl from '../emu/ps1-audio.worklet.js?url&no-inline';
+import { findAscii } from '../lib/consoles.js';
 
 // Runs the corrupted BIOS in our own PS1 core (Rust → WebAssembly) inside a
 // worker, draws its frames and plays its audio.
@@ -19,6 +20,8 @@ const status = ref('Press Boot to run the BIOS.');
 const running = ref(false);
 const muted = ref(false);
 const offscreen = ref(false);
+const report = ref(''); // debug report text once requested
+const reportNote = ref('');
 let worker = null;
 let audio = null; // { ctx, node, gain } once the worklet is loaded
 let audioReady = null;
@@ -80,12 +83,55 @@ function setupAudio() {
   return audioReady;
 }
 
-function stop(text = 'Stopped.') {
-  worker?.terminate();
-  worker = null;
+// Ends the run but keeps the worker, so its debug report can still be read.
+function halt(text) {
   running.value = false;
   clearInterval(watchdog);
   status.value = text;
+  worker?.postMessage({ type: 'stop' });
+}
+
+function stop(text = 'Stopped.') {
+  worker?.terminate();
+  worker = null;
+  halt(text);
+}
+
+function reportHeader() {
+  const at = findAscii(props.bios, 'System ROM Version');
+  let version = 'unknown';
+  if (at >= 0) {
+    let end = at;
+    while (end < props.bios.length && props.bios[end] >= 0x20 && props.bios[end] < 0x7f) end++;
+    version = String.fromCharCode(...props.bios.subarray(at, end));
+  }
+  return `BIOS: ${version}\nRegion: ${props.region}, disc: ${props.disc ? `${props.disc.length} bytes` : 'none'}`;
+}
+
+function showReport() {
+  if (!worker) {
+    report.value = 'Boot first, then get the report while it runs or after it stops.';
+    return;
+  }
+  reportNote.value = '';
+  worker.postMessage({ type: 'report' });
+}
+
+async function copyReport() {
+  try {
+    await navigator.clipboard.writeText(report.value);
+    reportNote.value = 'Copied.';
+  } catch {
+    reportNote.value = 'Copying was blocked; select the text and copy it, or download it.';
+  }
+}
+
+function downloadReport() {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([report.value], { type: 'text/plain' }));
+  a.download = 'ps1-debug-report.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
 async function boot() {
@@ -109,9 +155,11 @@ async function boot() {
       pending = m;
       raf = raf || requestAnimationFrame(draw);
     } else if (m.type === 'game-started') {
-      stop('The BIOS handed over to the game here. Only the boot is emulated, so it stops.');
+      halt('The BIOS handed over to the game here. Only the boot is emulated, so it stops.');
     } else if (m.type === 'error') {
-      stop(m.message);
+      halt(m.message);
+    } else if (m.type === 'report') {
+      report.value = `${reportHeader()}\n${m.text}`;
     }
   };
   // The worker posts audio straight to the audio thread.
@@ -179,10 +227,21 @@ defineExpose({ boot, stop });
     </div>
     <div class="row">
       <button class="primary" @click="boot">{{ running ? 'Reboot' : 'Boot' }}</button>
-      <button v-if="running" @click="stop()">Stop</button>
+      <button v-if="running" @click="halt('Stopped.')">Stop</button>
       <button @click="toggleMute">{{ muted ? 'Unmute' : 'Mute' }}</button>
       <button @click="snapshot">Save PNG</button>
+      <button @click="showReport">Debug report</button>
       <span v-if="running" class="note">{{ status }}</span>
+    </div>
+    <div v-if="report" class="report">
+      <textarea readonly :value="report" rows="10" aria-label="Debug report" />
+      <div class="row">
+        <button class="small" @click="copyReport">Copy</button>
+        <button class="small" @click="downloadReport">Download .txt</button>
+        <button class="small" @click="showReport">Refresh</button>
+        <button class="small" @click="report = ''">Close</button>
+        <span class="note">{{ reportNote }}</span>
+      </div>
     </div>
     <p class="note keys">
       Pad: arrows, Enter = Start, Backspace = Select, Z = ✕, X = ○, A = □, S = △, Q/W = L1/R1, E/R = L2/R2.
@@ -202,4 +261,6 @@ defineExpose({ boot, stop });
 canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
 .overlay { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 16px; background: rgba(0, 0, 0, 0.55); }
 .keys { margin: 0; }
+.report { display: grid; gap: 6px; }
+.report textarea { width: 100%; box-sizing: border-box; font: 12px/1.4 var(--mono); background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
 </style>

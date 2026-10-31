@@ -50,6 +50,9 @@ pub struct Bus {
     pub access_cycles: u32,
     /// Bytes written to the debug UART (expansion 2), for the test harness.
     pub debug_out: Vec<u8>,
+    /// I/O addresses with no emulated device, noted once each for the debug
+    /// report.
+    pub unknown_io: std::collections::BTreeSet<(u32, bool)>,
 }
 
 impl Bus {
@@ -77,6 +80,7 @@ impl Bus {
             dicr: 0,
             access_cycles: 0,
             debug_out: Vec::new(),
+            unknown_io: std::collections::BTreeSet::new(),
         }
     }
 
@@ -225,7 +229,10 @@ impl Bus {
             0x1F80_1820 | 0x1F80_1824 => 0, // MDEC
             0x1F80_1C00..=0x1F80_1FFF => self.spu.read16(p) as u32,
             0xFFFE_0130 => self.cache_ctrl,
-            _ => 0,
+            _ => {
+                self.note_unknown(p, false);
+                0
+            }
         }
     }
 
@@ -324,7 +331,13 @@ impl Bus {
             }
             0x1F80_1820 | 0x1F80_1824 => {} // MDEC
             0xFFFE_0130 => self.cache_ctrl = v,
-            _ => {}
+            _ => self.note_unknown(p, true),
+        }
+    }
+
+    fn note_unknown(&mut self, p: u32, write: bool) {
+        if self.unknown_io.len() < 256 {
+            self.unknown_io.insert((p, write));
         }
     }
 
