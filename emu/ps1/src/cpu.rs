@@ -47,6 +47,10 @@ pub struct Cpu {
     /// Optional hook for the test harness: called on syscall-free "debug
     /// putchar" style BIOS calls. Unused by the web build.
     pub tty: Vec<u8>,
+    /// Notable events for the debug report, drained once per frame.
+    pub trace: Vec<String>,
+    /// How often each BIOS function (A0/B0/C0 table, number) was called.
+    pub bios_calls: std::collections::BTreeMap<(u32, u32), u32>,
 }
 
 impl Cpu {
@@ -70,6 +74,8 @@ impl Cpu {
             wrote: 0,
             game_started: false,
             tty: Vec::new(),
+            trace: Vec::new(),
+            bios_calls: std::collections::BTreeMap::new(),
         }
     }
 
@@ -96,14 +102,18 @@ impl Cpu {
         // BIOS putchar hooks (A0:3C, B0:3D) are mirrored to the TTY buffer for
         // debugging. They don't change behaviour. A0:43 is DoExecute, the
         // hand-off to the game.
-        if self.pc & !0x10 == 0xA0 {
+        if matches!(self.pc, 0xA0 | 0xB0 | 0xC0) {
             let f = self.regs[9];
+            *self.bios_calls.entry((self.pc, f & 0xFF)).or_insert(0) += 1;
             if (self.pc == 0xA0 && f == 0x3C || self.pc == 0xB0 && f == 0x3D) && self.tty.len() < 1 << 16 {
                 self.tty.push(self.regs[4] as u8);
             }
             if self.pc == 0xA0 && f == 0x43 {
                 self.game_started = true;
             }
+        }
+        if self.pc == 0xBFC0_0000 && !self.bios_calls.is_empty() {
+            self.trace.push(format!("jumped back to the reset vector from {:08X}", self.next_pc.wrapping_sub(8)));
         }
 
         if self.current_pc & 3 != 0 {
@@ -150,6 +160,12 @@ impl Cpu {
     }
 
     fn exception(&mut self, cause: Exception) {
+        if !matches!(cause, Exception::Interrupt | Exception::Syscall) && self.trace.len() < 64 {
+            self.trace.push(format!(
+                "exception {:?} at {:08X} (bad addr {:08X}, sr {:08X})",
+                cause, self.current_pc, self.bad_vaddr, self.sr
+            ));
+        }
         let handler = if self.sr & (1 << 22) != 0 { 0xBFC0_0180 } else { 0x8000_0080 };
         let mode = self.sr & 0x3F;
         self.sr = (self.sr & !0x3F) | ((mode << 2) & 0x3F);

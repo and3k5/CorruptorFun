@@ -4,6 +4,7 @@ import { CONSOLES, CONSOLE_LIST, detectConsole, ps1Region } from '../lib/console
 import { DEFAULT_SETTINGS, ENGINES, clampRange, corrupt } from '../lib/corrupt.js';
 import { deleteBios, listBios, loadBios, saveBios } from '../lib/storage.js';
 import { loadDisc } from '../lib/disc.js';
+import { buildTestDisc } from '../lib/testdisc.js';
 import { accepts, easySearch, loadCache, pickCached, saveCache } from '../lib/easy.js';
 import wasmUrl from '../wasm/ps1.wasm?url';
 import ByteMap from '../components/ByteMap.vue';
@@ -298,6 +299,12 @@ async function onDisc(ev) {
   }
 }
 
+function useTestDisc() {
+  disc.value = buildTestDisc();
+  discLabel.value = 'Built-in test disc (homemade, no game on it)';
+  discError.value = '';
+}
+
 function clearDisc() {
   disc.value = null;
   discLabel.value = '';
@@ -343,11 +350,12 @@ onMounted(async () => {
         <div class="disc row">
           <span class="note">Disc:</span>
           <span v-if="disc" class="mono note">{{ discLabel }}</span>
-          <span v-else class="note">none, so the BIOS opens its memory card / CD player menu. Add a game image for the licensed screen.</span>
+          <span v-else class="note">none, so the BIOS opens its memory card / CD player menu. For the licensed screen, add a game image or use the built-in test disc.</span>
           <label class="button small file">
             {{ disc ? 'Change' : 'Use my disc image' }}
             <input type="file" multiple accept=".bin,.cue,.img,.iso" @change="onDisc" />
           </label>
+          <button v-if="!disc" class="small" @click="useTestDisc">Use test disc</button>
           <button v-if="disc" class="small" @click="clearDisc">Remove</button>
         </div>
         <p v-if="discError" class="note warn">{{ discError }}</p>

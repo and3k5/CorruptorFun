@@ -36,6 +36,8 @@ pub struct Cdrom {
     disc: Option<Vec<u8>>,
     /// Region letter used to answer GetID: b'A', b'E' or b'I'.
     pub region: u8,
+    /// Commands and responses for the debug report, drained once per frame.
+    pub trace: Vec<String>,
 }
 
 fn bcd(v: u32) -> u8 {
@@ -67,6 +69,7 @@ impl Cdrom {
             last_header: [0; 8],
             disc: None,
             region: b'E',
+            trace: Vec::new(),
         }
     }
 
@@ -167,6 +170,9 @@ impl Cdrom {
 
     fn command(&mut self, cmd: u8) {
         let p: Vec<u8> = self.params.drain(..).collect();
+        if self.trace.len() < 64 {
+            self.trace.push(format!("cd command {:02X} {:02X?}", cmd, p));
+        }
         self.busy = true;
         let has_disc = self.disc.is_some();
         match cmd {
@@ -356,6 +362,9 @@ impl Cdrom {
             front.delay = front.delay.saturating_sub(cycles);
             if front.delay == 0 && self.int_flag == 0 {
                 let p = self.queue.pop_front().unwrap();
+                if self.trace.len() < 64 {
+                    self.trace.push(format!("cd INT{} {:02X?}", p.int, p.data));
+                }
                 self.int_flag = p.int;
                 self.response.clear();
                 self.response.extend(p.data);

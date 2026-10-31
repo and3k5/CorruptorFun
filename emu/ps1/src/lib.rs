@@ -25,11 +25,16 @@ pub struct System {
     pub height: u32,
     /// When false, `run_frame` skips building the RGBA frame (headless runs).
     pub render: bool,
+    /// Timeline for the debug report: notable events, one line each.
+    pub log: Vec<String>,
+    frame_no: u32,
 }
+
+const LOG_LINES: usize = 1500;
 
 impl System {
     pub fn new(bios: Vec<u8>) -> Self {
-        System { cpu: Cpu::new(), bus: Bus::new(bios), frame: Vec::new(), width: 320, height: 240, render: true }
+        System { cpu: Cpu::new(), bus: Bus::new(bios), frame: Vec::new(), width: 320, height: 240, render: true, log: Vec::new(), frame_no: 0 }
     }
 
     /// Runs until the GPU finishes a frame (or a safety cap of cycles).
@@ -53,6 +58,60 @@ impl System {
         if self.render {
             self.render_frame();
         }
+        self.frame_no += 1;
+        self.collect_trace();
+    }
+
+    fn collect_trace(&mut self) {
+        let f = self.frame_no;
+        let mut lines: Vec<String> = Vec::new();
+        lines.append(&mut self.cpu.trace);
+        lines.append(&mut self.bus.cdrom.trace);
+        if f % 60 == 0 {
+            let b = &self.bus;
+            lines.push(format!(
+                "status pc {:08X} sr {:08X} I_STAT {:03X} I_MASK {:03X} display {} {}x{} voices {}",
+                self.cpu.pc,
+                self.cpu.sr,
+                b.istat,
+                b.imask,
+                if b.gpu.display_disabled { "off" } else { "on" },
+                self.width,
+                self.height,
+                b.spu.active_voices()
+            ));
+        }
+        for l in lines {
+            if self.log.len() < LOG_LINES {
+                self.log.push(format!("{f:5} {l}"));
+            }
+        }
+    }
+
+    /// Plain-text report of what the BIOS did, for bug reports.
+    pub fn debug_report(&self) -> String {
+        use std::fmt::Write;
+        let mut r = String::new();
+        let _ = writeln!(r, "CorruptorFun PS1 debug report");
+        let _ = writeln!(r, "frames {} pc {:08X} game started {}", self.frame_no, self.cpu.pc, self.cpu.game_started);
+        let _ = writeln!(r, "\n== timeline (frame, event) ==");
+        for l in &self.log {
+            let _ = writeln!(r, "{l}");
+        }
+        if self.log.len() >= LOG_LINES {
+            let _ = writeln!(r, "(timeline full)");
+        }
+        let _ = writeln!(r, "\n== BIOS calls (table:function count) ==");
+        for ((t, n), c) in &self.cpu.bios_calls {
+            let _ = writeln!(r, "{:X}:{:02X} {}", t >> 4, n, c);
+        }
+        let _ = writeln!(r, "\n== I/O with no emulated device ==");
+        for (a, w) in &self.bus.unknown_io {
+            let _ = writeln!(r, "{} {:08X}", if *w { "write" } else { "read" }, a);
+        }
+        let _ = writeln!(r, "\n== BIOS text output ==");
+        r.push_str(&String::from_utf8_lossy(&self.cpu.tty));
+        r
     }
 
     pub fn render_frame(&mut self) {
@@ -165,6 +224,30 @@ pub extern "C" fn ps1_render() {
 pub unsafe extern "C" fn ps1_load_exe(ptr: *mut u8, len: usize) -> u32 {
     let exe = Vec::from_raw_parts(ptr, len, len);
     sys().load_exe(&exe) as u32
+}
+
+static mut REPORT: Vec<u8> = Vec::new();
+
+/// Builds the debug report; read it with `ps1_report_ptr` and
+/// `ps1_report_len`.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn ps1_report() {
+    unsafe {
+        REPORT = sys().debug_report().into_bytes();
+    }
+}
+
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn ps1_report_ptr() -> *const u8 {
+    unsafe { REPORT.as_ptr() }
+}
+
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn ps1_report_len() -> usize {
+    unsafe { REPORT.len() }
 }
 
 #[no_mangle]

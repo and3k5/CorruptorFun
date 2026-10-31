@@ -87,6 +87,13 @@ onmessage = async (ev) => {
     }
   } else if (msg.type === 'buttons' && wasm) {
     wasm.ps1_set_buttons(msg.mask);
+  } else if (msg.type === 'report') {
+    let text = 'The emulator has not started.';
+    if (wasm) {
+      wasm.ps1_report();
+      text = new TextDecoder().decode(new Uint8Array(wasm.memory.buffer, wasm.ps1_report_ptr(), wasm.ps1_report_len()));
+    }
+    postMessage({ type: 'report', text });
   } else if (msg.type === 'stop') {
     running = false;
     clearTimeout(timer);

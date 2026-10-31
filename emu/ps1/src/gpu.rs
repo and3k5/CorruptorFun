@@ -52,7 +52,7 @@ pub struct Gpu {
     rect_flip_x: bool,
     rect_flip_y: bool,
     // GP1 state
-    display_disabled: bool,
+    pub display_disabled: bool,
     dma_dir: u32,
     disp_x: u32,
     disp_y: u32,
