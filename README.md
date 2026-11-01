@@ -40,6 +40,13 @@ keep re-corrupting the untouched original.
 - **PlayStation 2:** in progress. You can already store, corrupt and download
   PS2 BIOS files.
 
+**Render video** (PS1) boots the BIOS again headlessly in a worker
+(`src/emu/ps1-render.worker.js`), faster than real time where the device
+allows, and encodes every frame and the SPU sound with WebCodecs into an MP4
+(H.264 + AAC) or, where the browser can't encode those, a WebM (VP9 + Opus),
+using [Mediabunny](https://mediabunny.dev). Pick the length and size; with a
+game disc it ends at the hand-off to the game.
+
 **Easy corrupt** (PS1) boots a batch of random corruptions headlessly in
 background workers (`src/emu/ps1-probe.worker.js`), samples what each one shows
 and plays, and boots the best one that still has picture or sound and looks

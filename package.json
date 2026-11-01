@@ -12,6 +12,7 @@
     "test": "node --test tests/*.test.js && cd emu && cargo test --release"
   },
   "dependencies": {
+    "mediabunny": "1.61.6",
     "vue": "^3.5.44",
     "vue-router": "^5.4.0"
   },

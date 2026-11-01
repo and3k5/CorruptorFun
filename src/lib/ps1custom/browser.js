@@ -137,3 +137,35 @@ export function playPcm(pcm, rate) {
   src.start();
   player = { stop: () => { try { src.stop(); } catch { /* already stopped */ } } };
 }
+
+/**
+ * Records from the microphone. Returns { stop(), done } where `done`
+ * resolves to the recording as a Blob once stopped (or after maxSeconds).
+ * `onTick(seconds)` reports the time recorded so far.
+ */
+export async function recordAudio({ maxSeconds = MAX_SECONDS, onTick } = {}) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+  });
+  const rec = new MediaRecorder(stream);
+  const chunks = [];
+  rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  const started = performance.now();
+  const timer = setInterval(() => {
+    const s = (performance.now() - started) / 1000;
+    onTick?.(s);
+    if (s >= maxSeconds) stop();
+  }, 100);
+  const done = new Promise((resolve) => {
+    rec.onstop = () => {
+      clearInterval(timer);
+      stream.getTracks().forEach((t) => t.stop());
+      resolve(new Blob(chunks, { type: rec.mimeType }));
+    };
+  });
+  function stop() {
+    if (rec.state !== 'inactive') rec.stop();
+  }
+  rec.start();
+  return { stop, done };
+}
