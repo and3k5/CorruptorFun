@@ -29,3 +29,15 @@ test('test disc is an ISO 9660 volume with SYSTEM.CNF and a PS-X EXE', () => {
   const exe = files['PSX.EXE;1'];
   assert.equal(text(user(img, exe.lba), 0, 8), 'PS-X EXE');
 });
+
+test('test disc carries a license line and a logo model for the licensed screen', () => {
+  const us = buildTestDisc('A');
+  assert.match(text(user(us, 4), 0, 80), /^ {10}Licensed {2}by {10}Sony Computer Entertainment Amer {2}ica/);
+  assert.match(text(user(buildTestDisc('E'), 4), 0, 80), /Euro pe/);
+  const logo = new DataView(us.buffer, 5 * SECTOR + 24);
+  assert.equal(logo.getUint32(0, true), 0x41); // TMD id
+  assert.equal(logo.getUint32(8, true), 1); // one object
+  // Primitives follow the object table directly, all lit flat triangles.
+  assert.equal(logo.getUint32(12 + 16, true), 28);
+  assert.equal(us[5 * SECTOR + 24 + 40 + 3], 0x20);
+});
