@@ -16,9 +16,10 @@ keep re-corrupting the untouched original.
 - **PlayStation:** our own core in `emu/ps1` boots the real (corrupted) BIOS:
   intro, boot sound, and the memory card / CD player shell. Add your own game
   disc image (.cue + .bin, .bin or .iso) to see the licensed screen; emulation
-  stops when the BIOS hands control to the game. "Use test disc" builds a tiny
+  stops when the BIOS hands control to the game. The built-in test disc is in
+  by default (Remove takes it out, and that is remembered). It is a tiny
   homemade disc (no game, no Sony data) to see the licensed screen without
-  a game image. The BIOS takes the license line and the 3D logo above
+  a game image; its demo waits for the boot sound to finish. The BIOS takes the license line and the 3D logo above
   "PlayStation" from the disc, so the test disc shows the license line and a
   homemade "CF" logo instead of Sony's. Its program is a little demo (a
   picture with an Amiga-style sine scroller), and with the test disc the
@@ -68,7 +69,7 @@ exceptions and periodic status, BIOS calls and unemulated I/O, ready to copy
 into a bug report.
 
 `emu/ps1/src/bin/cli.rs` is a headless runner for debugging (`--report`
-prints the same report, `--trace N` prints N instructions and every I/O
+prints the same report, `--wav file` saves the audio, `--trace N` prints N instructions and every I/O
 access after the last frame):
 
 ```sh
