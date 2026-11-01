@@ -5,7 +5,7 @@ import { findWordmarks, availableLetters } from '../lib/ps1custom/wordmark.js';
 import { findVab, SAMPLE_ROLES } from '../lib/ps1custom/sound.js';
 import { imageToLogo, MAX_BYTES, MAX_TRIANGLES } from '../lib/ps1custom/logo.js';
 import { DEFAULT_LICENSE, licenseText } from '../lib/ps1custom/license.js';
-import { decodeAudio, decodeImage, pixelsToUrl, playPcm } from '../lib/ps1custom/browser.js';
+import { decodeAudio, decodeImage, pixelsToUrl, playPcm, recordAudio } from '../lib/ps1custom/browser.js';
 
 // The boot customization form. Works on a plain object (see
 // ps1custom/index.js) and emits a new one on every change.
@@ -105,19 +105,48 @@ function setLogoOpt(key, value) {
 // Sounds.
 const soundError = ref('');
 const soundBusy = ref(-1);
+// Recording from the microphone: which sample, how long so far, and how to stop.
+const rec = ref({ i: -1, seconds: 0, stop: null });
+const canRecord = typeof window !== 'undefined' && !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined';
+
+async function toggleRecord(i) {
+  if (rec.value.i === i) {
+    rec.value.stop?.();
+    return;
+  }
+  if (rec.value.i >= 0) return;
+  soundError.value = '';
+  try {
+    const r = await recordAudio({ onTick: (s) => (rec.value = { ...rec.value, seconds: s }) });
+    rec.value = { i, seconds: 0, stop: r.stop };
+    const blob = await r.done;
+    rec.value = { i: -1, seconds: 0, stop: null };
+    await useSound(i, blob, `Recording ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+  } catch (e) {
+    rec.value = { i: -1, seconds: 0, stop: null };
+    soundError.value =
+      e?.name === 'NotAllowedError' ? 'The browser wasn\'t allowed to use the microphone.' : `Couldn't record: ${e?.message || e}`;
+  }
+}
+
 async function onSound(i, ev) {
   const file = ev.target.files?.[0];
   ev.target.value = '';
   if (!file) return;
+  await useSound(i, file, file.name);
+}
+
+async function useSound(i, file, name) {
   soundError.value = '';
   soundBusy.value = i;
   try {
     const { pcm, rate, seconds } = await decodeAudio(file);
     const sounds = [...c.value.sounds];
-    sounds[i] = { name: file.name, pcm, rate, seconds, loop: false };
+    if (!pcm.length) throw new Error('silent');
+    sounds[i] = { name, pcm, rate, seconds, loop: false };
     update({ sounds });
   } catch {
-    soundError.value = `Couldn't decode ${file.name}. This browser can't play that format; try WAV, MP3, OGG or FLAC.`;
+    soundError.value = `Couldn't use ${name}: it's silent, or this browser can't play that format (WAV, MP3, OGG and FLAC work).`;
   } finally {
     soundBusy.value = -1;
   }
@@ -240,7 +269,16 @@ function resetAll() {
               {{ soundBusy === i ? 'Decoding…' : c.sounds[i] ? 'Change' : 'Replace' }}
               <input type="file" accept="audio/*,video/*,.wav,.mp3,.ogg,.oga,.flac,.m4a,.aac,.opus,.webm" @change="onSound(i, $event)" />
             </label>
-            <template v-if="c.sounds[i]">
+            <button
+              v-if="canRecord"
+              class="small"
+              :class="{ recording: rec.i === i }"
+              :disabled="rec.i >= 0 && rec.i !== i"
+              @click="toggleRecord(i)"
+            >
+              {{ rec.i === i ? `■ Stop ${rec.seconds.toFixed(1)} s` : '● Record' }}
+            </button>
+            <template v-if="c.sounds[i] && rec.i !== i">
               <span class="mono note name" :title="c.sounds[i].name">{{ c.sounds[i].name }}</span>
               <button class="small" aria-label="Play" @click="playPcm(c.sounds[i].pcm, c.sounds[i].rate)">▶</button>
               <button class="small danger" aria-label="Back to the original sample" @click="setSound(i, null)">✕</button>
@@ -253,7 +291,8 @@ function resetAll() {
         </div>
         <p v-if="soundError" class="note warn">{{ soundError }}</p>
         <p class="note">
-          Any format your browser can play. The BIOS plays your sound as an instrument: at the pitches and with the fade of
+          Any format your browser can play, or record one with your microphone (up to 7 s; silence at the start is
+          trimmed). The BIOS plays your sound as an instrument: at the pitches and with the fade of
           its own jingle. All replaced samples share the room the originals took (about 42 KB, 1.7 s at 44.1 kHz), so longer
           sounds are stored at 22 or 11 kHz, and cut if they still don't fit.
         </p>
@@ -279,5 +318,6 @@ function resetAll() {
 .preview { width: 100%; max-height: 160px; object-fit: contain; image-rendering: pixelated; background: #000; border-radius: 6px; }
 .file { position: relative; overflow: hidden; }
 .file input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.recording { border-color: var(--accent-2); color: var(--accent-2); }
 .name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
