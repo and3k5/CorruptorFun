@@ -34,6 +34,17 @@ let pending = null; // newest frame not yet drawn
 let raf = 0;
 let observer = null;
 
+// Video render: a separate headless run of the same boot, encoded to a file.
+const SIZES = { '320x240': [320, 240], '640x480': [640, 480], '960x720': [960, 720], '1280x960': [1280, 960] };
+const renderOpen = ref(false);
+const renderSeconds = ref(30);
+const renderSize = ref('640x480');
+const rendering = ref(false);
+const renderProgress = ref(0); // 0..1
+const renderNote = ref('');
+const video = ref(null); // { url, name, mb } once rendered
+let renderWorker = null;
+
 // Keyboard → PS1 pad bits (active high).
 const KEYS = {
   Enter: 1 << 3, ShiftRight: 1 << 0, Backspace: 1 << 0,
@@ -142,6 +153,72 @@ function downloadReport() {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
+function clearVideo() {
+  if (video.value) URL.revokeObjectURL(video.value.url);
+  video.value = null;
+}
+
+function renderVideo() {
+  cancelRender();
+  clearVideo();
+  const seconds = Math.min(600, Math.max(1, Number(renderSeconds.value) || 30));
+  renderSeconds.value = seconds;
+  const [width, height] = SIZES[renderSize.value];
+  const bios = props.bios.slice().buffer;
+  const disc = props.disc ? props.disc.slice().buffer : null;
+  const w = new Worker(new URL('../emu/ps1-render.worker.js', import.meta.url), { type: 'module' });
+  renderWorker = w;
+  rendering.value = true;
+  renderProgress.value = 0;
+  renderNote.value = 'Starting…';
+  const finish = () => {
+    w.terminate();
+    if (renderWorker === w) renderWorker = null;
+    rendering.value = false;
+  };
+  w.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.type === 'progress') {
+      renderProgress.value = Math.min(1, m.seconds / m.of);
+      renderNote.value = m.finishing ? 'Finishing the file…' : `Rendered ${m.seconds.toFixed(1)} of ${m.of} s`;
+    } else if (m.type === 'done') {
+      finish();
+      const blob = new Blob([m.buffer], { type: m.mime });
+      video.value = { url: URL.createObjectURL(blob), name: `ps1-boot.${m.ext}`, mb: (blob.size / 1048576).toFixed(1) };
+      const why = m.reason === 'hand-off' ? ', up to where the BIOS hands over to the game' : '';
+      renderNote.value = `Done: ${m.seconds.toFixed(1)} s${why}${m.sound ? '' : ' (no sound: this browser cannot encode audio)'}.`;
+    } else if (m.type === 'cancelled') {
+      finish();
+      renderNote.value = 'Cancelled.';
+    } else if (m.type === 'error') {
+      finish();
+      renderNote.value = m.message;
+    }
+  };
+  w.onerror = (e) => {
+    finish();
+    renderNote.value = `The renderer failed: ${e.message || 'unknown error'}`;
+  };
+  const transfer = [bios];
+  if (disc) transfer.push(disc);
+  w.postMessage({ type: 'render', wasmUrl: new URL(wasmUrl, location.href).href, bios, disc, region: props.region, runGame: props.runGame, seconds, width, height }, transfer);
+}
+
+function cancelRender() {
+  if (!renderWorker) return;
+  renderWorker.postMessage({ type: 'cancel' });
+  // Don't wait on a stuck encoder: kill it if it hasn't stopped soon.
+  const w = renderWorker;
+  setTimeout(() => {
+    if (renderWorker === w) {
+      w.terminate();
+      renderWorker = null;
+      rendering.value = false;
+      renderNote.value = 'Cancelled.';
+    }
+  }, 1500);
+}
+
 async function boot() {
   stop();
   const ready = setupAudio();
@@ -215,6 +292,8 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   stop();
+  renderWorker?.terminate();
+  clearVideo();
   observer?.disconnect();
   cancelAnimationFrame(raf);
   window.removeEventListener('keydown', onKey);
@@ -239,8 +318,38 @@ defineExpose({ boot, stop });
       <button v-if="running" @click="halt('Stopped.')">Stop</button>
       <button @click="toggleMute">{{ muted ? 'Unmute' : 'Mute' }}</button>
       <button @click="snapshot">Save PNG</button>
+      <button :aria-expanded="renderOpen" @click="renderOpen = !renderOpen">Render video</button>
       <button @click="showReport">Debug report</button>
       <span v-if="running" class="note">{{ status }}</span>
+    </div>
+    <div v-if="renderOpen" class="render">
+      <p class="note">
+        Boots this BIOS again from the start, without the screen, and saves the picture and sound as a video
+        file. It renders faster than real time where the device allows, and every frame is kept. The pad isn't
+        used. With a game disc it ends where the BIOS hands over to the game.
+      </p>
+      <div class="row">
+        <label>Length (s) <input v-model.number="renderSeconds" type="number" min="1" max="600" step="1" :disabled="rendering" /></label>
+        <label>
+          Size
+          <select v-model="renderSize" :disabled="rendering">
+            <option v-for="(_, k) in SIZES" :key="k" :value="k">{{ k.replace('x', ' × ') }}</option>
+          </select>
+        </label>
+        <button v-if="!rendering" class="primary" @click="renderVideo">Render</button>
+        <button v-else @click="cancelRender">Cancel</button>
+      </div>
+      <div v-if="rendering || renderNote" class="row">
+        <progress v-if="rendering" :value="renderProgress" max="1" />
+        <span class="note" role="status">{{ renderNote }}</span>
+      </div>
+      <div v-if="video" class="render-out">
+        <video :src="video.url" controls playsinline />
+        <div class="row">
+          <a class="button primary" :href="video.url" :download="video.name">Download {{ video.name }} ({{ video.mb }} MB)</a>
+          <button class="small" @click="clearVideo">Discard</button>
+        </div>
+      </div>
     </div>
     <div v-if="report" class="report">
       <textarea readonly :value="report" rows="10" aria-label="Debug report" />
@@ -271,5 +380,11 @@ canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; 
 .overlay { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 16px; background: rgba(0, 0, 0, 0.55); }
 .keys { margin: 0; }
 .report { display: grid; gap: 6px; }
+.render { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+.render .note { margin: 0; }
+.render input[type='number'] { width: 5em; }
+.render progress { flex: 1; min-width: 120px; }
+.render-out { display: grid; gap: 6px; }
+.render-out video { width: 100%; max-height: 360px; background: #000; border-radius: 6px; }
 .report textarea { width: 100%; box-sizing: border-box; font: 12px/1.4 var(--mono); background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
 </style>
