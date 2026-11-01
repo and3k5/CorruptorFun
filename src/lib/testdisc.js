@@ -162,7 +162,10 @@ export function logoModel() {
 
 // `exe` is the PS-X EXE the BIOS starts, as built by testdisc/build.sh
 // (src/assets/testdisc.exe: a picture with a scroller).
-export function buildTestDisc(region = 'A', exe = loopExe()) {
+// Options: `license`, the license text to use instead of the region's (as
+// built by ps1custom/license.js), and `logo`, a logo model (TMD) to use
+// instead of the "CF" (see ps1custom/logo.js).
+export function buildTestDisc(region = 'A', exe = loopExe(), { license, logo: customLogo } = {}) {
   const img = new Uint8Array(SECTORS * SECTOR);
   const data = (lba) => img.subarray(lba * SECTOR + 24, lba * SECTOR + 24 + 2048);
   const exeSectors = Math.ceil(exe.length / 2048);
@@ -183,8 +186,9 @@ export function buildTestDisc(region = 'A', exe = loopExe()) {
     img[o + 22] = submode;
   }
 
-  ascii(data(LBA.license), 0, `          Licensed  by          ${LICENSE[region] || LICENSE.A}`);
-  const logo = logoModel();
+  ascii(data(LBA.license), 0, license ?? `          Licensed  by          ${LICENSE[region] || LICENSE.A}`);
+  const logo = customLogo || logoModel();
+  if (logo.length > 7 * 2048) throw new Error('the logo model is bigger than the 7 sectors the BIOS reads');
   for (let i = 0; i < logo.length; i += 2048) data(LBA.logo + i / 2048).set(logo.subarray(i, i + 2048));
 
   const cnf = new TextEncoder().encode('BOOT = cdrom:\\PSX.EXE;1\r\nTCB = 4\r\nEVENT = 10\r\nSTACK = 801FFFF0\r\n');

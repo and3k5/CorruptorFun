@@ -2,14 +2,17 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import { CONSOLES, CONSOLE_LIST, detectConsole, ps1Region } from '../lib/consoles.js';
 import { DEFAULT_SETTINGS, ENGINES, clampRange, corrupt } from '../lib/corrupt.js';
-import { deleteBios, listBios, loadBios, saveBios } from '../lib/storage.js';
+import { deleteBios, listBios, loadBios, loadCustom, saveBios, saveCustom } from '../lib/storage.js';
 import { loadDisc } from '../lib/disc.js';
 import { buildTestDisc } from '../lib/testdisc.js';
 import testProgramUrl from '../assets/testdisc.exe?url';
 import { accepts, easySearch, loadCache, pickCached, saveCache } from '../lib/easy.js';
 import wasmUrl from '../wasm/ps1.wasm?url';
+import { biosChanged, customizeBios, defaultCustom, discOptions } from '../lib/ps1custom/index.js';
+import { canvasFallback } from '../lib/ps1custom/browser.js';
 import ByteMap from '../components/ByteMap.vue';
 import Ps1Screen from '../components/Ps1Screen.vue';
+import Ps1Customize from '../components/Ps1Customize.vue';
 
 const PREFS_KEY = 'corruptorfun.bios.prefs';
 
@@ -52,7 +55,24 @@ const cons = computed(() => CONSOLES[consoleId.value]);
 const forConsole = computed(() => library.value.filter((b) => b.consoleId === consoleId.value));
 const range = computed(() => (current.value ? clampRange(settings, current.value.data.length) : { start: 0, end: 0 }));
 const region = computed(() => (current.value && consoleId.value === 'ps1' ? ps1Region(current.value.data) : 'E'));
-const bootBytes = computed(() => result.value?.data || current.value?.data);
+
+// Boot customizations (PS1): text, logo and sounds. The BIOS side goes into a
+// copy of the original, and corruptions start from that copy.
+const custom = shallowRef(defaultCustom());
+const customized = computed(() => {
+  if (!current.value) return { rom: null, notes: [], used: {} };
+  if (consoleId.value !== 'ps1') return { rom: current.value.data, notes: [], used: {} };
+  return customizeBios(current.value.data, custom.value, { fallback: canvasFallback });
+});
+const base = computed(() => customized.value.rom);
+const bootBytes = computed(() => result.value?.data || base.value);
+// A short fingerprint of the customized BIOS, for the Easy corrupt cache.
+const baseTag = computed(() => {
+  if (!base.value || !biosChanged(custom.value)) return '';
+  let h = 0x811c9dc5;
+  for (let i = 0; i < base.value.length; i += 7) h = Math.imul(h ^ base.value[i], 0x01000193);
+  return (h >>> 0).toString(16);
+});
 
 function savePrefs() {
   const all = readPrefs();
@@ -152,7 +172,7 @@ function bootNow() {
 
 function runCorruption() {
   if (!current.value) return;
-  result.value = corrupt(current.value.data, settings);
+  result.value = corrupt(base.value, settings);
   bootNow();
 }
 
@@ -164,7 +184,7 @@ function reroll() {
 const hex4 = (n) => '0x' + n.toString(16).toUpperCase().padStart(5, '0');
 
 function easyCacheNow() {
-  const key = `${current.value.id || current.value.name}:${region.value}:${coreTag}`;
+  const key = `${current.value.id || current.value.name}:${region.value}:${coreTag}${baseTag.value ? `:${baseTag.value}` : ''}`;
   if (key !== easyCacheKey) {
     easyCache = loadCache(key);
     easyCacheKey = key;
@@ -176,7 +196,7 @@ function countSaved() {
   const c = current.value && consoleId.value === 'ps1' ? easyCacheNow() : null;
   easy.saved = c?.refMetrics ? c.candidates.filter((x) => !x.used && accepts(x.metrics, c.refMetrics, easyFilters)).length : 0;
 }
-watch(current, countSaved);
+watch([current, baseTag], countSaved);
 
 function describe(c) {
   const what = `${ENGINES[c.settings.engine].label} × ${c.settings.count} in ${hex4(c.settings.start)}–${hex4(c.settings.end)}`;
@@ -190,7 +210,7 @@ function useCandidate(c) {
   saveCache(easyCacheKey, easyCache);
   countSaved();
   Object.assign(settings, c.settings);
-  result.value = corrupt(current.value.data, c.settings);
+  result.value = corrupt(base.value, c.settings);
   bootNow();
 }
 
@@ -210,7 +230,7 @@ async function runEasy() {
   screen.value?.stop?.();
   try {
     const tried = await easySearch({
-      bios: current.value.data,
+      bios: base.value,
       consoleId: consoleId.value,
       region: region.value,
       wasmUrl: new URL(wasmUrl, location.href).href,
@@ -278,13 +298,14 @@ const startText = computed({ get: () => hex(settings.start), set: (v) => (settin
 const endText = computed({ get: () => hex(settings.end), set: (v) => (settings.end = parseOffset(v)) });
 
 function download() {
-  if (!result.value || !current.value) return;
-  const base = current.value.name.replace(/\.[^.]+$/, '');
+  const data = result.value?.data || (baseTag.value && base.value);
+  if (!data || !current.value) return;
+  const stem = current.value.name.replace(/\.[^.]+$/, '');
   const ext = current.value.name.match(/\.[^.]+$/)?.[0] || '.bin';
-  const blob = new Blob([result.value.data], { type: 'application/octet-stream' });
+  const blob = new Blob([data], { type: 'application/octet-stream' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `${base}.corrupt-${settings.engine}-${settings.seed}${ext}`;
+  a.download = result.value ? `${stem}.corrupt-${settings.engine}-${settings.seed}${ext}` : `${stem}.custom${ext}`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
@@ -305,13 +326,17 @@ async function onDisc(ev) {
   }
 }
 
+let testProgram = null;
 async function useTestDisc() {
   testDiscWanted.value = true;
   discError.value = '';
   try {
-    const res = await fetch(testProgramUrl);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    disc.value = buildTestDisc(region.value, new Uint8Array(await res.arrayBuffer()));
+    if (!testProgram) {
+      const res = await fetch(testProgramUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      testProgram = new Uint8Array(await res.arrayBuffer());
+    }
+    disc.value = buildTestDisc(region.value, testProgram, discOptions(custom.value));
     discLabel.value = 'Built-in test disc (homemade, with a little demo instead of a game)';
     discIsTest.value = true;
   } catch (e) {
@@ -334,6 +359,25 @@ watch(
     if (consoleId.value === 'ps1' && current.value && testDiscWanted.value && (!disc.value || discIsTest.value)) useTestDisc();
   },
 );
+
+// Customizations are remembered in this browser.
+let customLoaded = false;
+loadCustom('ps1')
+  .then((v) => {
+    if (v) custom.value = { ...defaultCustom(), ...v };
+  })
+  .catch(() => {})
+  .finally(() => (customLoaded = true));
+
+function onCustom(next) {
+  custom.value = next;
+  if (customLoaded) saveCustom('ps1', next).catch(() => {});
+  if (!current.value) return;
+  // Redo the current corruption on the new base, rebuild the test disc, reboot.
+  if (result.value) result.value = corrupt(base.value, settings);
+  if (discIsTest.value) useTestDisc().then(bootNow);
+  else bootNow();
+}
 
 const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(n % 1048576 ? 1 : 0)} MB` : `${Math.round(n / 1024)} KB`);
 
@@ -405,7 +449,7 @@ onMounted(async () => {
         :hits="result?.hits || []"
         :start="range.start"
         :end="range.end"
-        :original="current.data"
+        :original="base"
         :corrupted="result?.data"
       />
     </section>
@@ -494,10 +538,21 @@ onMounted(async () => {
         </details>
         <div class="row actions">
           <button :disabled="!current" @click="cleanBoot">Clean boot</button>
-          <button :disabled="!result" @click="download">Download corrupted BIOS</button>
+          <button :disabled="!result && !baseTag" @click="download">Download {{ result ? 'corrupted' : 'customized' }} BIOS</button>
         </div>
-        <p class="note">Every corruption starts from your untouched original.</p>
+        <p class="note">Every corruption starts from your untouched original{{ baseTag ? ', with your customizations' : '' }}.</p>
       </section>
+
+      <Ps1Customize
+        v-if="consoleId === 'ps1' && current"
+        :model-value="custom"
+        :bios="current.data"
+        :region="region"
+        :notes="customized.notes"
+        :used="customized.used"
+        :test-disc="discIsTest"
+        @update:model-value="onCustom"
+      />
     </aside>
   </div>
 </template>

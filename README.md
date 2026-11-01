@@ -26,6 +26,17 @@ keep re-corrupting the untouched original.
   emulator keeps running after the hand-off to show it. The demo's source is
   in `testdisc/`; `testdisc/build.sh` rebuilds `src/assets/testdisc.exe`
   (needs clang, ld.lld and Pillow).
+- **Customize the boot** (PS1): change the SONY / COMPUTER / ENTERTAINMENT and
+  "PlayStation" text, the license text and the logo on the licensed screen,
+  and the boot sound samples (`src/lib/ps1custom/`). The text pictures are
+  rebuilt from the letters cut out of your own BIOS (missing letters are
+  drawn with a similar system font); the license text and the logo go on the
+  test disc. A logo picture becomes pixel art made of lit flat triangles,
+  the only kind the BIOS draws, within its limits (about 590 triangles,
+  14 KB). Sounds in any format the browser can decode are re-encoded as SPU
+  ADPCM into the room the original samples took (about 42 KB), at a lower
+  rate if needed. Customizations are kept in IndexedDB, and corruptions start
+  from the customized BIOS.
 - **PlayStation 2:** in progress. You can already store, corrupt and download
   PS2 BIOS files.
 
@@ -70,7 +81,7 @@ into a bug report.
 
 `emu/ps1/src/bin/cli.rs` is a headless runner for debugging (`--report`
 prints the same report, `--wav file` saves the audio, `--trace N` prints N instructions and every I/O
-access after the last frame):
+access after the last frame, `--vram N` dumps VRAM at frame N, `--region A|E|I` sets the disc region):
 
 ```sh
 cd emu && cargo run --release --bin ps1-cli -- BIOS.BIN --frames 600 --out frame.ppm

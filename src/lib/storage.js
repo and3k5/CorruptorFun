@@ -3,25 +3,28 @@
 
 const DB_NAME = 'corruptorfun';
 const STORE = 'bios';
+// Boot customizations (text, logo, sounds), by key.
+const CUSTOM = 'custom';
 
 function open() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
+    const req = indexedDB.open(DB_NAME, 2);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(CUSTOM)) db.createObjectStore(CUSTOM);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
 
-async function tx(mode, fn) {
+async function tx(mode, fn, store = STORE) {
   const db = await open();
   try {
     return await new Promise((resolve, reject) => {
-      const t = db.transaction(STORE, mode);
-      const result = fn(t.objectStore(STORE));
+      const t = db.transaction(store, mode);
+      const result = fn(t.objectStore(store));
       t.oncomplete = () => resolve(result && 'result' in result ? result.result : undefined);
       t.onerror = () => reject(t.error);
       t.onabort = () => reject(t.error);
@@ -59,4 +62,12 @@ export async function loadBios(id) {
 
 export async function deleteBios(id) {
   await tx('readwrite', (s) => s.delete(id));
+}
+
+export async function saveCustom(key, value) {
+  await tx('readwrite', (s) => s.put(value, key), CUSTOM);
+}
+
+export async function loadCustom(key) {
+  return (await tx('readonly', (s) => s.get(key), CUSTOM)) ?? null;
 }
