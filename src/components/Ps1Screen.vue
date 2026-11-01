@@ -10,6 +10,9 @@ const props = defineProps({
   bios: { type: Object, required: true }, // corrupted Uint8Array
   disc: { type: Object, default: null }, // raw data track Uint8Array
   region: { type: String, default: 'E' },
+  // Keep running after the BIOS starts the disc's program (our test disc's
+  // demo). Real games stop there: only the boot is emulated.
+  runGame: { type: Boolean, default: false },
   // Float a small copy of the screen in the corner while it's scrolled away.
   mini: { type: Boolean, default: false },
 });
@@ -155,7 +158,8 @@ async function boot() {
       pending = m;
       raf = raf || requestAnimationFrame(draw);
     } else if (m.type === 'game-started') {
-      halt('The BIOS handed over to the game here. Only the boot is emulated, so it stops.');
+      if (props.runGame) status.value = "The boot finished, and the test disc's demo is running.";
+      else halt('The BIOS handed over to the game here. Only the boot is emulated, so it stops.');
     } else if (m.type === 'error') {
       halt(m.message);
     } else if (m.type === 'report') {
@@ -173,7 +177,7 @@ async function boot() {
   const transfer = [bios];
   if (disc) transfer.push(disc);
   if (audioPort) transfer.push(audioPort);
-  w.postMessage({ type: 'start', wasmUrl: new URL(wasmUrl, location.href).href, bios, disc, region: props.region, audioPort }, transfer);
+  w.postMessage({ type: 'start', wasmUrl: new URL(wasmUrl, location.href).href, bios, disc, region: props.region, runGame: props.runGame, audioPort }, transfer);
   lastFrame = performance.now();
   watchdog = setInterval(() => {
     if (running.value && performance.now() - lastFrame > 4000) {

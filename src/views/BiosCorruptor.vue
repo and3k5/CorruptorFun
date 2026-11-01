@@ -5,6 +5,7 @@ import { DEFAULT_SETTINGS, ENGINES, clampRange, corrupt } from '../lib/corrupt.j
 import { deleteBios, listBios, loadBios, saveBios } from '../lib/storage.js';
 import { loadDisc } from '../lib/disc.js';
 import { buildTestDisc } from '../lib/testdisc.js';
+import testProgramUrl from '../assets/testdisc.exe?url';
 import { accepts, easySearch, loadCache, pickCached, saveCache } from '../lib/easy.js';
 import wasmUrl from '../wasm/ps1.wasm?url';
 import ByteMap from '../components/ByteMap.vue';
@@ -32,6 +33,7 @@ const busy = ref(false);
 const storageOk = ref(true);
 const disc = shallowRef(null);
 const discLabel = ref('');
+const discIsTest = ref(false);
 const discError = ref('');
 const screen = ref(null);
 const mini = ref(!!prefs.mini);
@@ -292,6 +294,7 @@ async function onDisc(ev) {
     const d = await loadDisc(files);
     disc.value = d.data;
     discLabel.value = d.label;
+    discIsTest.value = false;
   } catch (e) {
     discError.value = e.message;
   } finally {
@@ -299,15 +302,23 @@ async function onDisc(ev) {
   }
 }
 
-function useTestDisc() {
-  disc.value = buildTestDisc(region.value);
-  discLabel.value = 'Built-in test disc (homemade, no game on it)';
+async function useTestDisc() {
   discError.value = '';
+  try {
+    const res = await fetch(testProgramUrl);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    disc.value = buildTestDisc(region.value, new Uint8Array(await res.arrayBuffer()));
+    discLabel.value = 'Built-in test disc (homemade, with a little demo instead of a game)';
+    discIsTest.value = true;
+  } catch (e) {
+    discError.value = `Could not load the test disc: ${e.message}`;
+  }
 }
 
 function clearDisc() {
   disc.value = null;
   discLabel.value = '';
+  discIsTest.value = false;
 }
 
 const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(n % 1048576 ? 1 : 0)} MB` : `${Math.round(n / 1024)} KB`);
@@ -346,7 +357,7 @@ onMounted(async () => {
       </div>
 
       <template v-else-if="consoleId === 'ps1'">
-        <Ps1Screen ref="screen" :bios="bootBytes" :disc="disc" :region="region" :mini="mini" />
+        <Ps1Screen ref="screen" :bios="bootBytes" :disc="disc" :run-game="discIsTest" :region="region" :mini="mini" />
         <div class="disc row">
           <span class="note">Disc:</span>
           <span v-if="disc" class="mono note">{{ discLabel }}</span>

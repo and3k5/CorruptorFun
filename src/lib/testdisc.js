@@ -1,7 +1,8 @@
 // A tiny homemade PlayStation data disc, built in memory: an ISO 9660 volume
-// with SYSTEM.CNF and a minimal PS-X EXE that just loops. It contains no Sony
-// data. It's enough for a BIOS to recognise a disc and walk the licensed boot
-// path up to starting the program, which is where our emulation stops.
+// with SYSTEM.CNF and a small PS-X EXE of our own. It contains no Sony data.
+// It's enough for a BIOS to recognise a disc and walk the licensed boot path
+// up to starting the program. With the test disc, the emulator keeps running
+// that program (a picture with a scroller, see testdisc/).
 //
 // The disc's system area also carries what the BIOS shows on the licensed
 // screen: the license line (sector 4), which the BIOS prints under the
@@ -47,7 +48,8 @@ function dirRecord(name, lba, size, isDir) {
   return r;
 }
 
-function exeFile() {
+// A stand-in program that just loops, for when no program is given.
+function loopExe() {
   const exe = new Uint8Array(2048 + 2048);
   const v = new DataView(exe.buffer);
   ascii(exe, 0, 'PS-X EXE');
@@ -158,12 +160,16 @@ export function logoModel() {
   return tmd;
 }
 
-export function buildTestDisc(region = 'A') {
+// `exe` is the PS-X EXE the BIOS starts, as built by testdisc/build.sh
+// (src/assets/testdisc.exe: a picture with a scroller).
+export function buildTestDisc(region = 'A', exe = loopExe()) {
   const img = new Uint8Array(SECTORS * SECTOR);
   const data = (lba) => img.subarray(lba * SECTOR + 24, lba * SECTOR + 24 + 2048);
+  const exeSectors = Math.ceil(exe.length / 2048);
+  if (LBA.exe + exeSectors > SECTORS) throw new Error('the test program is too big for the test disc');
 
   // Headers for every sector: sync, MSF address, mode 2, form 1 subheader.
-  const fileEnds = new Set([LBA.pvd, LBA.term, LBA.pathL, LBA.pathM, LBA.root, LBA.cnf, LBA.exe + 1]);
+  const fileEnds = new Set([LBA.pvd, LBA.term, LBA.pathL, LBA.pathM, LBA.root, LBA.cnf, LBA.exe + exeSectors - 1]);
   for (let lba = 0; lba < SECTORS; lba++) {
     const o = lba * SECTOR;
     img.fill(0xff, o + 1, o + 11);
@@ -182,10 +188,8 @@ export function buildTestDisc(region = 'A') {
   for (let i = 0; i < logo.length; i += 2048) data(LBA.logo + i / 2048).set(logo.subarray(i, i + 2048));
 
   const cnf = new TextEncoder().encode('BOOT = cdrom:\\PSX.EXE;1\r\nTCB = 4\r\nEVENT = 10\r\nSTACK = 801FFFF0\r\n');
-  const exe = exeFile();
   data(LBA.cnf).set(cnf);
-  data(LBA.exe).set(exe.subarray(0, 2048));
-  data(LBA.exe + 1).set(exe.subarray(2048));
+  for (let i = 0; i < exeSectors; i++) data(LBA.exe + i).set(exe.subarray(i * 2048, (i + 1) * 2048));
 
   // Root directory.
   const root = data(LBA.root);
