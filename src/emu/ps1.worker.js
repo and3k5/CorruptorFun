@@ -14,6 +14,8 @@ let timer = 0;
 let running = false;
 let audioPort = null;
 let nextAt = 0;
+let runGame = false; // keep going after the hand-off (test disc)
+let handedOver = false;
 
 function copyIn(bytes) {
   const ptr = wasm.alloc(bytes.length);
@@ -45,7 +47,7 @@ function tick() {
       wasm.ps1_run_frame();
       flushAudio();
       nextAt += frameMs;
-      if (wasm.ps1_game_started()) break;
+      if (!runGame && wasm.ps1_game_started()) break;
     }
   } catch (e) {
     running = false;
@@ -57,10 +59,13 @@ function tick() {
   const pixels = mem().slice(wasm.ps1_frame_ptr(), wasm.ps1_frame_ptr() + w * h * 4);
   postMessage({ type: 'frame', w, h, pixels: pixels.buffer }, [pixels.buffer]);
 
-  if (wasm.ps1_game_started()) {
-    running = false;
+  if (wasm.ps1_game_started() && !handedOver) {
+    handedOver = true;
     postMessage({ type: 'game-started' });
-    return;
+    if (!runGame) {
+      running = false;
+      return;
+    }
   }
   timer = setTimeout(tick, Math.max(0, nextAt - performance.now()));
 }
@@ -70,6 +75,7 @@ onmessage = async (ev) => {
   if (msg.type === 'start') {
     try {
       audioPort = msg.audioPort || null;
+      runGame = !!msg.runGame;
       const { instance } = await WebAssembly.instantiateStreaming(fetch(msg.wasmUrl), {});
       wasm = instance.exports;
       const bios = new Uint8Array(msg.bios);

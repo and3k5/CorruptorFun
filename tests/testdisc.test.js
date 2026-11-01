@@ -41,3 +41,13 @@ test('test disc carries a license line and a logo model for the licensed screen'
   assert.equal(logo.getUint32(12 + 16, true), 28);
   assert.equal(us[5 * SECTOR + 24 + 40 + 3], 0x20);
 });
+
+test('test disc carries the demo program when given', async () => {
+  const { readFileSync } = await import('node:fs');
+  const exe = new Uint8Array(readFileSync(new URL('../src/assets/testdisc.exe', import.meta.url)));
+  assert.equal(text(exe, 0, 8), 'PS-X EXE');
+  const img = buildTestDisc('A', exe);
+  const sectors = exe.length / 2048;
+  assert.deepEqual(user(img, 22 + sectors - 1), exe.subarray((sectors - 1) * 2048));
+  assert.equal(img[(22 + sectors - 1) * SECTOR + 18], 0x89); // end of file
+});

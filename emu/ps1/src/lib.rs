@@ -42,7 +42,10 @@ impl System {
         let start = self.bus.gpu.frames;
         let mut budget: u64 = 0;
         let mut acc = 0;
-        while self.bus.gpu.frames == start && budget < 2_000_000 && !self.cpu.game_started {
+        // The frame ends early when the BIOS hands over to the game, so the
+        // caller can stop there. If it carries on, the program keeps running.
+        let started_before = self.cpu.game_started;
+        while self.bus.gpu.frames == start && budget < 2_000_000 && (started_before || !self.cpu.game_started) {
             self.bus.access_cycles = 0;
             let c = self.cpu.step(&mut self.bus);
             if self.bus.cdrom.exe_entry == Some(self.cpu.pc) {

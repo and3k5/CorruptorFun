@@ -13,3 +13,4 @@ dist
 emu/target
 src/wasm
 *.ppm
+testdisc/tables.h
