@@ -16,6 +16,7 @@ fn main() {
     let mut shots = Vec::new();
     let mut i = 2;
     let mut report = false;
+    let mut trace = 0u32;
     while i < args.len() {
         match args[i].as_str() {
             "--exe" => { exe = Some(std::fs::read(&args[i + 1]).expect("exe")); i += 1 }
@@ -23,6 +24,7 @@ fn main() {
             "--frames" => { frames = args[i + 1].parse().unwrap(); i += 1 }
             "--out" => { out = args[i + 1].clone(); i += 1 }
             "--report" => report = true,
+            "--trace" => { trace = args[i + 1].parse().unwrap(); i += 1 }
             "--shot" => { shots.push(args[i + 1].parse::<u32>().unwrap()); i += 1 }
             _ => {}
         }
@@ -39,6 +41,28 @@ fn main() {
         }
     }
     eprintln!("{} frames in {:?}, pc={:08x}", frames, t.elapsed(), sys.cpu.pc);
+    // Instruction-level trace after the frames, for debugging.
+    if trace > 0 {
+        let d = sys.bus.read32(0x1F80_10F4);
+        let p = sys.bus.read32(0x1F80_10F0);
+        println!("DICR {d:08X} DPCR {p:08X}");
+        for ch in 0..7u32 {
+            let b = 0x1F80_1080 + ch * 0x10;
+            println!("ch{ch} madr {:08X} bcr {:08X} chcr {:08X}", sys.bus.read32(b), sys.bus.read32(b + 4), sys.bus.read32(b + 8));
+        }
+    }
+    sys.bus.io_trace = trace > 0;
+    for _ in 0..trace {
+        let pc = sys.cpu.pc;
+        let instr = sys.bus.read32(pc);
+        sys.bus.access_cycles = 0;
+        let c = sys.cpu.step(&mut sys.bus);
+        sys.bus.tick(c);
+        println!(
+            "{pc:08X} {instr:08X} sr {:08X} cause {:08X} istat {:03X} imask {:03X} v0 {:08X} a0 {:08X} t1 {:02X}",
+            sys.cpu.sr, sys.cpu.cause, sys.bus.istat, sys.bus.imask, sys.cpu.regs[2], sys.cpu.regs[4], sys.cpu.regs[9]
+        );
+    }
     if !sys.bus.debug_out.is_empty() {
         std::io::stdout().write_all(&sys.bus.debug_out).unwrap();
     }

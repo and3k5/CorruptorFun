@@ -38,6 +38,9 @@ pub struct Cdrom {
     pub region: u8,
     /// Commands and responses for the debug report, drained once per frame.
     pub trace: Vec<String>,
+    /// Entry point of the last PS-X EXE header read from the disc. The BIOS
+    /// jumping there means it has handed over to the game.
+    pub exe_entry: Option<u32>,
 }
 
 fn bcd(v: u32) -> u8 {
@@ -70,6 +73,7 @@ impl Cdrom {
             disc: None,
             region: b'E',
             trace: Vec::new(),
+            exe_entry: None,
         }
     }
 
@@ -335,6 +339,10 @@ impl Cdrom {
         let raw = &disc[off..off + SECTOR];
         self.last_header.copy_from_slice(&raw[12..20]);
         self.sector_buf = if self.mode & 0x20 != 0 { raw[12..12 + 0x924].to_vec() } else { raw[24..24 + 0x800].to_vec() };
+        let user = &raw[24..24 + 0x800];
+        if &user[..8] == b"PS-X EXE" {
+            self.exe_entry = Some(u32::from_le_bytes([user[0x10], user[0x11], user[0x12], user[0x13]]));
+        }
     }
 
     /// Returns true when a new interrupt becomes pending.

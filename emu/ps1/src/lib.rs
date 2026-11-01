@@ -45,6 +45,9 @@ impl System {
         while self.bus.gpu.frames == start && budget < 2_000_000 && !self.cpu.game_started {
             self.bus.access_cycles = 0;
             let c = self.cpu.step(&mut self.bus);
+            if self.bus.cdrom.exe_entry == Some(self.cpu.pc) {
+                self.cpu.game_started = true;
+            }
             acc += c;
             budget += c as u64;
             if acc >= TICK_BATCH {
