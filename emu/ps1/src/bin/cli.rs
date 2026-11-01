@@ -14,6 +14,7 @@ fn main() {
     let mut out = String::from("frame.ppm");
     let mut exe = None;
     let mut shots = Vec::new();
+    let mut vram_at: Vec<u32> = Vec::new();
     let mut i = 2;
     let mut report = false;
     let mut trace = 0u32;
@@ -24,9 +25,11 @@ fn main() {
             "--disc" => { sys.bus.cdrom.set_disc(Some(std::fs::read(&args[i + 1]).expect("disc"))); i += 1 }
             "--frames" => { frames = args[i + 1].parse().unwrap(); i += 1 }
             "--out" => { out = args[i + 1].clone(); i += 1 }
+            "--region" => { sys.bus.cdrom.region = args[i + 1].as_bytes()[0]; i += 1 }
             "--report" => report = true,
             "--wav" => { wav = Some(args[i + 1].clone()); i += 1 }
             "--trace" => { trace = args[i + 1].parse().unwrap(); i += 1 }
+            "--vram" => { vram_at.push(args[i + 1].parse::<u32>().unwrap()); i += 1 }
             "--shot" => { shots.push(args[i + 1].parse::<u32>().unwrap()); i += 1 }
             _ => {}
         }
@@ -43,6 +46,9 @@ fn main() {
             audio.extend_from_slice(&sys.bus.spu.out);
         }
         sys.bus.spu.out.clear();
+        if vram_at.contains(&f) {
+            write_vram(&sys, &format!("{}-vram-{:04}.ppm", out.trim_end_matches(".ppm"), f));
+        }
         if shots.contains(&f) {
             write_ppm(&sys, &format!("{}-{:04}.ppm", out.trim_end_matches(".ppm"), f));
         }
@@ -107,4 +113,18 @@ fn write_ppm(sys: &System, path: &str) {
     for p in sys.frame.chunks_exact(4) {
         f.write_all(&p[..3]).unwrap();
     }
+}
+
+/// Dumps all of VRAM as a 1024x512 picture, reading it as 15-bit colour.
+fn write_vram(sys: &System, path: &str) {
+    let mut f = std::fs::File::create(path).unwrap();
+    write!(f, "P6 1024 512 255\n").unwrap();
+    let mut buf = Vec::with_capacity(1024 * 512 * 3);
+    for &p in &sys.bus.gpu.vram {
+        let c = |s: u16| (((p >> s) & 31) << 3) as u8;
+        buf.extend_from_slice(&[c(0), c(5), c(10)]);
+    }
+    f.write_all(&buf).unwrap();
+    let raw: Vec<u8> = sys.bus.gpu.vram.iter().flat_map(|p| p.to_le_bytes()).collect();
+    std::fs::write(format!("{}.raw", path.trim_end_matches(".ppm")), raw).unwrap();
 }
