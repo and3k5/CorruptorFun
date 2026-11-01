@@ -43,9 +43,14 @@ const KEYS = {
 };
 let buttons = 0;
 
+// Typing in a text field (or a select) is for the field, not the pad.
+function isEditing(el) {
+  return !!el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName));
+}
+
 function onKey(ev) {
   const bit = KEYS[ev.code];
-  if (!bit || !running.value) return;
+  if (!bit || !running.value || isEditing(ev.target)) return;
   ev.preventDefault();
   buttons = ev.type === 'keydown' ? buttons | bit : buttons & ~bit;
   worker?.postMessage({ type: 'buttons', mask: buttons });
