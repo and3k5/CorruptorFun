@@ -175,13 +175,13 @@ impl Spu {
         // (exponential, decreasing, shift, step, target)
         let (exp, dec, shift, step, target): (bool, bool, i32, i32, i32) = match v.phase {
             Phase::Attack => (a1 & 0x8000 != 0, false, ((a1 >> 10) & 0x1F) as i32, 7 - ((a1 >> 8) & 3) as i32, 0x7FFF),
-            Phase::Decay => (true, true, ((a1 >> 4) & 0xF) as i32 * 4, -8, (((a1 & 0xF) as i32 + 1) * 0x800).min(0x7FFF)),
+            Phase::Decay => (true, true, ((a1 >> 4) & 0xF) as i32, -8, (((a1 & 0xF) as i32 + 1) * 0x800).min(0x7FFF)),
             Phase::Sustain => {
                 let dec = a2 & 0x4000 != 0;
                 let st = ((a2 >> 6) & 3) as i32;
                 (a2 & 0x8000 != 0, dec, ((a2 >> 8) & 0x1F) as i32, if dec { -8 + st } else { 7 - st }, -1)
             }
-            Phase::Release => (a2 & 0x20 != 0, true, (a2 & 0x1F) as i32 * 4, -8, 0),
+            Phase::Release => (a2 & 0x20 != 0, true, (a2 & 0x1F) as i32, -8, 0),
             Phase::Off => return,
         };
         if v.env_wait > 0 {
@@ -300,5 +300,28 @@ mod tests {
         s.tick(768 * 2000);
         assert!(s.out.iter().any(|&x| x.abs() > 1000));
         assert_eq!(s.read16(base + 0x1AE) & 0x3F, 0);
+    }
+
+    #[test]
+    fn released_voice_fades_out() {
+        let mut s = Spu::new();
+        let mut block = [0x77u8; 16];
+        block[0] = 0;
+        block[1] = 0x03;
+        s.ram[0x1000..0x1010].copy_from_slice(&block);
+        let base = 0x1F80_1C00;
+        s.write16(base + 0x1AA, 0xC000);
+        s.write16(base + 4, 0x1000);
+        s.write16(base + 6, 0x1000 / 8);
+        s.write16(base + 8, 0x00FF); // fast attack, slowest decay, full sustain level
+        s.write16(base + 10, 0x0020 | 0x0A); // exponential release, shift 10
+        s.write16(base + 0x188, 1);
+        s.tick(768 * 4000);
+        assert!(s.read16(base + 0xC) > 0x4000);
+        s.write16(base + 0x18C, 1); // key off
+        // Release shift 10 takes well under a second from full volume.
+        s.tick(768 * 44100);
+        assert_eq!(s.read16(base + 0xC), 0);
+        assert_eq!(s.active_voices(), 0);
     }
 }

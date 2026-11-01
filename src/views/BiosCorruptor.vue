@@ -34,6 +34,8 @@ const storageOk = ref(true);
 const disc = shallowRef(null);
 const discLabel = ref('');
 const discIsTest = ref(false);
+// The test disc is in by default; removing it is remembered.
+const testDiscWanted = ref(prefs.testDisc ?? true);
 const discError = ref('');
 const screen = ref(null);
 const mini = ref(!!prefs.mini);
@@ -59,6 +61,7 @@ function savePrefs() {
   all.mini = mini.value;
   all.advancedOpen = advancedOpen.value;
   all.easyFilters = { ...easyFilters };
+  all.testDisc = testDiscWanted.value;
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(all));
   } catch {
@@ -66,7 +69,7 @@ function savePrefs() {
   }
 }
 watch(settings, savePrefs, { deep: true });
-watch([mini, advancedOpen], savePrefs);
+watch([mini, advancedOpen, testDiscWanted], savePrefs);
 watch(easyFilters, () => {
   savePrefs();
   countSaved();
@@ -303,6 +306,7 @@ async function onDisc(ev) {
 }
 
 async function useTestDisc() {
+  testDiscWanted.value = true;
   discError.value = '';
   try {
     const res = await fetch(testProgramUrl);
@@ -316,10 +320,20 @@ async function useTestDisc() {
 }
 
 function clearDisc() {
+  if (discIsTest.value) testDiscWanted.value = false;
   disc.value = null;
   discLabel.value = '';
   discIsTest.value = false;
 }
+
+// Put the test disc in (again) when a PS1 BIOS is picked, since its license
+// line follows the BIOS's region. A disc image of the user's own stays.
+watch(
+  [region, consoleId, current],
+  () => {
+    if (consoleId.value === 'ps1' && current.value && testDiscWanted.value && (!disc.value || discIsTest.value)) useTestDisc();
+  },
+);
 
 const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(n % 1048576 ? 1 : 0)} MB` : `${Math.round(n / 1024)} KB`);
 

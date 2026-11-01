@@ -1,7 +1,7 @@
 //! Headless runner for testing: boots a BIOS (or side-loads an EXE), runs N
 //! frames and writes the last frame as a PPM.
 //!
-//! ps1-cli <bios> [--exe file] [--disc file.bin] [--frames N] [--out frame.ppm] [--report]
+//! ps1-cli <bios> [--exe file] [--disc file.bin] [--frames N] [--out frame.ppm] [--report] [--wav out.wav]
 
 use ps1::System;
 use std::io::Write;
@@ -17,6 +17,7 @@ fn main() {
     let mut i = 2;
     let mut report = false;
     let mut trace = 0u32;
+    let mut wav: Option<String> = None;
     while i < args.len() {
         match args[i].as_str() {
             "--exe" => { exe = Some(std::fs::read(&args[i + 1]).expect("exe")); i += 1 }
@@ -24,6 +25,7 @@ fn main() {
             "--frames" => { frames = args[i + 1].parse().unwrap(); i += 1 }
             "--out" => { out = args[i + 1].clone(); i += 1 }
             "--report" => report = true,
+            "--wav" => { wav = Some(args[i + 1].clone()); i += 1 }
             "--trace" => { trace = args[i + 1].parse().unwrap(); i += 1 }
             "--shot" => { shots.push(args[i + 1].parse::<u32>().unwrap()); i += 1 }
             _ => {}
@@ -34,8 +36,13 @@ fn main() {
         assert!(sys.load_exe(&e), "not a PS-X EXE");
     }
     let t = std::time::Instant::now();
+    let mut audio: Vec<i16> = Vec::new();
     for f in 0..frames {
         sys.run_frame();
+        if wav.is_some() {
+            audio.extend_from_slice(&sys.bus.spu.out);
+        }
+        sys.bus.spu.out.clear();
         if shots.contains(&f) {
             write_ppm(&sys, &format!("{}-{:04}.ppm", out.trim_end_matches(".ppm"), f));
         }
@@ -73,6 +80,25 @@ fn main() {
         eprintln!("--- tty ---\n{}", String::from_utf8_lossy(&sys.cpu.tty));
     }
     write_ppm(&sys, &out);
+    if let Some(path) = wav {
+        write_wav(&audio, &path);
+    }
+}
+
+fn write_wav(samples: &[i16], path: &str) {
+    let mut f = std::fs::File::create(path).unwrap();
+    let bytes = samples.len() as u32 * 2;
+    f.write_all(b"RIFF").unwrap();
+    f.write_all(&(36 + bytes).to_le_bytes()).unwrap();
+    f.write_all(b"WAVEfmt ").unwrap();
+    for v in [16u32, 0x0002_0001, 44100, 44100 * 4, 0x0010_0004] {
+        f.write_all(&v.to_le_bytes()).unwrap();
+    }
+    f.write_all(b"data").unwrap();
+    f.write_all(&bytes.to_le_bytes()).unwrap();
+    for s in samples {
+        f.write_all(&s.to_le_bytes()).unwrap();
+    }
 }
 
 fn write_ppm(sys: &System, path: &str) {

@@ -8,6 +8,7 @@ typedef unsigned short u16;
 typedef unsigned char u8;
 
 #define R32(a) (*(volatile u32 *)(a))
+#define R16(a) (*(volatile u16 *)(a))
 #define GP0 R32(0x1F801810)
 #define GP1 R32(0x1F801814) // GPUSTAT when read
 #define I_STAT R32(0x1F801070)
@@ -65,7 +66,8 @@ static const u8 *glyph(char c) {
 #define BAND_H 68
 #define TEXT_Y (BAND_TOP + BAND_H / 2 - 7 * SCALE / 2)
 #define WAVE 12 // scroller wave height, pixels each way
-#define HOLD_FRAMES 150
+#define HOLD_MIN 60 // frames the licensed screen stays up at least
+#define HOLD_MAX 900 // and at most, if the sound never dies down
 
 static void wait_gpu(void) {
   while (!(GP1 & (1 << 26))) {}
@@ -80,6 +82,14 @@ static void rect(int x, int y, int w, int h, u32 colour) {
 static void wait_vblank(void) {
   I_STAT = ~1u; // acknowledge the last one
   while (!(I_STAT & 1)) {}
+}
+
+// True once no SPU voice is audible: every voice's envelope (ENVX) is down
+// to almost nothing.
+static int spu_quiet(void) {
+  for (int v = 0; v < 24; v++)
+    if (R16(0x1F801C0C + v * 16) > 0x40) return 0;
+  return 1;
 }
 
 static void draw(int top, int t) {
@@ -134,9 +144,12 @@ int main(void) {
   __asm__ volatile("mtc0 $zero, $12"); // interrupts off: we poll instead
   I_MASK = 0;
 
-  // Leave the licensed screen up for a couple of seconds first, like a game
+  // Leave the licensed screen up while the boot sound plays out, like a game
   // that's still loading.
-  for (int i = 0; i < HOLD_FRAMES; i++) wait_vblank();
+  for (int i = 0; i < HOLD_MAX; i++) {
+    wait_vblank();
+    if (i >= HOLD_MIN && spu_quiet()) break;
+  }
 
   GP1 = 0x00000000; // reset the GPU
   GP1 = 0x06000000 | 0x260 | (0xC60 << 12); // horizontal display range
