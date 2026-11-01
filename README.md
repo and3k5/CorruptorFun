@@ -18,8 +18,9 @@ keep re-corrupting the untouched original.
   disc image (.cue + .bin, .bin or .iso) to see the licensed screen; emulation
   stops when the BIOS hands control to the game. "Use test disc" builds a tiny
   homemade disc (no game, no Sony data) to see the licensed screen without
-  a game image; the license text and logo come from a real disc, so they're
-  blank with it.
+  a game image. The BIOS takes the license line and the 3D logo above
+  "PlayStation" from the disc, so the test disc shows the license line and a
+  homemade "CF" logo instead of Sony's.
 - **PlayStation 2:** in progress. You can already store, corrupt and download
   PS2 BIOS files.
 

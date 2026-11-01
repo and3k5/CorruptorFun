@@ -300,7 +300,7 @@ async function onDisc(ev) {
 }
 
 function useTestDisc() {
-  disc.value = buildTestDisc();
+  disc.value = buildTestDisc(region.value);
   discLabel.value = 'Built-in test disc (homemade, no game on it)';
   discError.value = '';
 }

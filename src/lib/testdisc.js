@@ -2,10 +2,15 @@
 // with SYSTEM.CNF and a minimal PS-X EXE that just loops. It contains no Sony
 // data. It's enough for a BIOS to recognise a disc and walk the licensed boot
 // path up to starting the program, which is where our emulation stops.
+//
+// The disc's system area also carries what the BIOS shows on the licensed
+// screen: the license line (sector 4), which the BIOS prints under the
+// "PlayStation" text, and a 3D model (sectors 5 on), which it draws above it.
+// On a real disc that model is Sony's logo; ours is a homemade "CF".
 
 const SECTOR = 2352;
 const SECTORS = 300;
-const LBA = { pvd: 16, term: 17, pathL: 18, pathM: 19, root: 20, cnf: 21, exe: 22 };
+const LBA = { license: 4, logo: 5, pvd: 16, term: 17, pathL: 18, pathM: 19, root: 20, cnf: 21, exe: 22 };
 const EXE_ADDR = 0x80010000;
 
 const bcd = (v) => ((v / 10) << 4) | v % 10;
@@ -56,7 +61,104 @@ function exeFile() {
   return exe;
 }
 
-export function buildTestDisc() {
+// The license line as real discs carry it, per region ('A', 'E' or 'I').
+const LICENSE = {
+  A: 'Sony Computer Entertainment Amer  ica ',
+  E: 'Sony Computer Entertainment Euro pe   ',
+  I: 'Sony Computer Entertainment Inc.',
+};
+
+// Our logo: the letters "CF" built from cubes, as the BIOS's logo model
+// format wants it. That is a TMD with one object whose primitives follow the
+// object table directly, using only lit flat triangles (mode 0x20): colour,
+// then normal and vertex indices.
+const LETTERS = [
+  ['#####', '#####'],
+  ['#....', '#....'],
+  ['#....', '#....'],
+  ['#....', '####.'],
+  ['#....', '#....'],
+  ['#....', '#....'],
+  ['#####', '#....'],
+];
+const COLOURS = [
+  [255, 70, 200],
+  [60, 220, 255],
+];
+// The BIOS lights the model from the upper left, front. Fronts lean a little
+// towards that light so the colours come out bright.
+const NORMALS = [
+  [-1672, -1672, -3344], // front
+  [0, -4096, 0], // top
+  [-4096, 0, 0], // left
+  [4096, 0, 0], // right
+  [0, 4096, 0], // bottom
+];
+
+export function logoModel() {
+  const U = 110; // cube size
+  const Y = -200; // the model's centre, in the BIOS's view
+  const verts = [];
+  const index = new Map();
+  const vert = (x, y, z) => {
+    const k = `${x},${y},${z}`;
+    if (!index.has(k)) {
+      index.set(k, verts.length);
+      verts.push([x, y, z]);
+    }
+    return index.get(k);
+  };
+  const sides = [];
+  const fronts = [];
+  const quad = (list, [a, b, c, d], normal, colour) => list.push([a, b, c, normal, colour], [a, c, d, normal, colour]);
+  for (let letter = 0; letter < 2; letter++) {
+    const filled = (x, y) => LETTERS[y]?.[letter][x] === '#';
+    const colour = COLOURS[letter];
+    const shade = colour.map((c) => Math.round(c * 0.7));
+    for (let gy = 0; gy < 7; gy++) {
+      for (let gx = 0; gx < 5; gx++) {
+        if (!filled(gx, gy)) continue;
+        const x0 = Math.round((letter * 6 + gx - 5.5) * U), x1 = x0 + U;
+        const y0 = Math.round(Y + (gy - 3.5) * U), y1 = y0 + U;
+        const z0 = -U / 2, z1 = U / 2;
+        if (!filled(gx, gy - 1)) quad(sides, [vert(x0, y0, z1), vert(x1, y0, z1), vert(x1, y0, z0), vert(x0, y0, z0)], 1, shade);
+        if (!filled(gx, gy + 1)) quad(sides, [vert(x0, y1, z0), vert(x1, y1, z0), vert(x1, y1, z1), vert(x0, y1, z1)], 4, shade);
+        if (!filled(gx - 1, gy)) quad(sides, [vert(x0, y0, z1), vert(x0, y0, z0), vert(x0, y1, z0), vert(x0, y1, z1)], 2, shade);
+        if (!filled(gx + 1, gy)) quad(sides, [vert(x1, y0, z0), vert(x1, y0, z1), vert(x1, y1, z1), vert(x1, y1, z0)], 3, shade);
+        quad(fronts, [vert(x0, y0, z0), vert(x1, y0, z0), vert(x1, y1, z0), vert(x0, y1, z0)], 0, colour);
+      }
+    }
+  }
+  const tris = [...sides, ...fronts]; // fronts last, so they're drawn on top
+
+  const OBJ = 28;
+  const primBytes = tris.length * 16;
+  const vertTop = OBJ + primBytes;
+  const normTop = vertTop + verts.length * 8;
+  const size = 12 + normTop + NORMALS.length * 8;
+  const tmd = new Uint8Array(size);
+  const v = new DataView(tmd.buffer);
+  v.setUint32(0, 0x41, true); // TMD id
+  v.setUint32(4, 0, true); // offsets are relative to the object table
+  v.setUint32(8, 1, true); // one object
+  [vertTop, verts.length, normTop, NORMALS.length, OBJ, tris.length, 0].forEach((x, i) => v.setUint32(12 + i * 4, x, true));
+  tris.forEach(([a, b, c, n, [r, g, bl]], i) => {
+    const o = 12 + OBJ + i * 16;
+    v.setUint32(o, 0x20000304, true); // mode 0x20, flag 0, ilen 3, olen 4
+    tmd.set([r, g, bl, 0x20], o + 4);
+    v.setUint16(o + 8, n, true);
+    v.setUint16(o + 10, a, true);
+    v.setUint16(o + 12, b, true);
+    v.setUint16(o + 14, c, true);
+  });
+  const put = (top, list) =>
+    list.forEach((p, i) => p.forEach((x, k) => v.setInt16(12 + top + i * 8 + k * 2, x, true)));
+  put(vertTop, verts);
+  put(normTop, NORMALS);
+  return tmd;
+}
+
+export function buildTestDisc(region = 'A') {
   const img = new Uint8Array(SECTORS * SECTOR);
   const data = (lba) => img.subarray(lba * SECTOR + 24, lba * SECTOR + 24 + 2048);
 
@@ -74,6 +176,10 @@ export function buildTestDisc() {
     img[o + 18] = submode;
     img[o + 22] = submode;
   }
+
+  ascii(data(LBA.license), 0, `          Licensed  by          ${LICENSE[region] || LICENSE.A}`);
+  const logo = logoModel();
+  for (let i = 0; i < logo.length; i += 2048) data(LBA.logo + i / 2048).set(logo.subarray(i, i + 2048));
 
   const cnf = new TextEncoder().encode('BOOT = cdrom:\\PSX.EXE;1\r\nTCB = 4\r\nEVENT = 10\r\nSTACK = 801FFFF0\r\n');
   const exe = exeFile();
