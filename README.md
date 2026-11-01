@@ -16,7 +16,10 @@ keep re-corrupting the untouched original.
 - **PlayStation:** our own core in `emu/ps1` boots the real (corrupted) BIOS:
   intro, boot sound, and the memory card / CD player shell. Add your own game
   disc image (.cue + .bin, .bin or .iso) to see the licensed screen; emulation
-  stops when the BIOS hands control to the game.
+  stops when the BIOS hands control to the game. "Use test disc" builds a tiny
+  homemade disc (no game, no Sony data) to see the licensed screen without
+  a game image; the license text and logo come from a real disc, so they're
+  blank with it.
 - **PlayStation 2:** in progress. You can already store, corrupt and download
   PS2 BIOS files.
 
@@ -55,7 +58,13 @@ crashes or hangs can't freeze the page. The worker paces frames against the
 wall clock (catching up by skipping pictures, not slowing down) and sends audio
 straight to an AudioWorklet (`src/emu/ps1-audio.worklet.js`).
 
-`emu/ps1/src/bin/cli.rs` is a headless runner for debugging:
+"Debug report" under the screen shows a timeline of CD-ROM commands, CPU
+exceptions and periodic status, BIOS calls and unemulated I/O, ready to copy
+into a bug report.
+
+`emu/ps1/src/bin/cli.rs` is a headless runner for debugging (`--report`
+prints the same report, `--trace N` prints N instructions and every I/O
+access after the last frame):
 
 ```sh
 cd emu && cargo run --release --bin ps1-cli -- BIOS.BIN --frames 600 --out frame.ppm

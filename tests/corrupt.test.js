@@ -42,4 +42,9 @@ test('PS1 region comes from the BIOS version string', () => {
   bios.set(new TextEncoder().encode('System ROM Version 4.1 12/16/97 A'), 100);
   assert.equal(ps1Region(bios), 'A');
   assert.equal(ps1Region(new Uint8Array(1024)), 'E');
+  // An earlier version string without a region doesn't hide the real one.
+  const two = new Uint8Array(1024);
+  two.set(new TextEncoder().encode('System ROM Version 1.0'), 10);
+  two.set(new TextEncoder().encode('System ROM Version 2.2 12/04/95 J'), 200);
+  assert.equal(ps1Region(two), 'I');
 });

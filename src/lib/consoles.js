@@ -62,14 +62,19 @@ export function detectConsole(bytes) {
 // "System ROM Version 4.1 12/16/97 E". The CD-ROM answers GetID with the
 // matching SCEx code so a licensed disc boots. Returns 'A', 'E' or 'I'.
 export function ps1Region(bios) {
-  const at = includesAscii(bios, 'System ROM Version');
-  if (at >= 0) {
-    let end = at;
+  // Some BIOSes hold more than one version string (e.g. "System ROM Version
+  // 1.0" without a region, then "... 2.2 12/04/95 A"), so check each one.
+  let from = 0;
+  for (;;) {
+    const at = includesAscii(bios.subarray(from), 'System ROM Version');
+    if (at < 0) break;
+    let end = from + at;
     while (end < bios.length && bios[end] >= 0x20 && bios[end] < 0x7f) end++;
     const last = String.fromCharCode(bios[end - 1]);
     if (last === 'A') return 'A';
     if (last === 'J') return 'I';
     if (last === 'E') return 'E';
+    from = end;
   }
   return 'E';
 }

@@ -22,20 +22,65 @@ const AREAS = {
   ps1: { kernel: [0x00000, 0x10000], shell: [0x18000, 0x64000], font: [0x66000, 0x80000] },
 };
 
-// Settings for one random candidate, drawn from `rand`.
-export function candidateSettings(consoleId, size, rand) {
-  const total = RECIPES.reduce((a, r) => a + r.w, 0);
-  let pick = rand() * total;
-  const recipe = RECIPES.find((r) => (pick -= r.w) < 0) || RECIPES[0];
+// What earlier probes taught us, per 4 KB block of the BIOS: how often a
+// corruption window over it gave a good result. Every BIOS revision lays its
+// data out differently, so this steers later candidates towards the parts
+// that matter for this one.
+const BLOCK = 0x1000;
+
+export function learn(history, size) {
+  const n = Math.ceil(size / BLOCK);
+  const stats = { good: new Float64Array(n), tried: new Float64Array(n) };
+  for (const c of history) addToStats(stats, c.settings, c.metrics);
+  return stats;
+}
+
+export function addToStats(stats, settings, metrics) {
+  const b0 = Math.floor(settings.start / BLOCK);
+  const b1 = Math.max(b0 + 1, Math.ceil(settings.end / BLOCK));
+  const share = 1 / (b1 - b0);
+  for (let b = b0; b < b1 && b < stats.tried.length; b++) {
+    stats.tried[b] += share;
+    if (metrics.ok) stats.good[b] += share;
+  }
+}
+
+// Chance estimate that a corruption over a block gives a good result.
+const blockWeight = (stats, b) => (stats ? (stats.good[b] + 0.5) / (stats.tried[b] + 1) : 0.5);
+
+// Settings for one random candidate, drawn from `rand`, steered by `stats`
+// from learn() when given.
+export function candidateSettings(consoleId, size, rand, stats = null) {
+  const areas = AREAS[consoleId] || {};
+  const bounds = (area) => {
+    const [a0, a1] = areas[area] || [0, size];
+    return [Math.min(a0, size - 1), Math.min(a1, size)];
+  };
+  const areaWeight = (area) => {
+    const [s, e] = bounds(area);
+    let sum = 0, n = 0;
+    for (let b = Math.floor(s / BLOCK); b < Math.ceil(e / BLOCK); b++, n++) sum += blockWeight(stats, b);
+    return n ? sum / n : 0.5;
+  };
+  const weights = RECIPES.map((r) => r.w * areaWeight(r.area));
+  let pick = rand() * weights.reduce((a, w) => a + w, 0);
+  const recipe = RECIPES[weights.findIndex((w) => (pick -= w) < 0)] || RECIPES[0];
   const between = ([lo, hi]) => lo + Math.floor(rand() * (hi - lo + 1));
-  const [a0, a1] = (AREAS[consoleId] || {})[recipe.area] || [0, size];
-  const areaStart = Math.min(a0, size - 1);
-  const areaEnd = Math.min(a1, size);
-  // Focus on a window of the area (5% to all of it): concentrated hits tend
-  // to give coherent glitches rather than noise.
+  const [areaStart, areaEnd] = bounds(recipe.area);
+
+  // Centre the window on a block, favouring blocks that worked before.
+  const first = Math.floor(areaStart / BLOCK);
+  const blocks = [];
+  for (let b = first; b < Math.ceil(areaEnd / BLOCK); b++) blocks.push(blockWeight(stats, b) ** 2);
+  let bp = rand() * blocks.reduce((a, w) => a + w, 0);
+  const centreBlock = first + Math.max(0, blocks.findIndex((w) => (bp -= w) < 0));
+  const centre = centreBlock * BLOCK + Math.floor(rand() * BLOCK);
+
+  // Window of 5% to all of the area: concentrated hits tend to give coherent
+  // glitches rather than noise.
   const span = areaEnd - areaStart;
   const len = Math.max(16, Math.floor(span * Math.exp(Math.log(0.05) * rand())));
-  const start = areaStart + (Math.floor((rand() * (span - len + 1)) / 16) * 16);
+  const start = Math.max(areaStart, Math.min(areaEnd - len, (Math.floor((centre - len / 2) / 16) * 16)));
   return {
     ...DEFAULT_SETTINGS,
     engine: recipe.engine,
@@ -105,7 +150,7 @@ export function pickCached(cache, filters) {
 // pass `accept` (or `maxTries` is reached), adding every probe to `cache`
 // ({ ref, refMetrics, candidates }, filled in on first use). Returns how many
 // were tried.
-export async function easySearch({ bios, consoleId, region, wasmUrl, makeWorker, cache, accept, onProgress, signal, maxTries = 16, enough = 3, frames = 300 }) {
+export async function easySearch({ bios, consoleId, region, wasmUrl, makeWorker, cache, accept, onProgress, signal, maxTries = 16, enough = 3, frames = 540 }) {
   const giveUp = (refChecks) => {
     const first = refChecks.findIndex((c) => lit(c.grid) > 0.02 || c.loud > LOUD);
     return Math.max(150, (first < 0 ? 15 : first + 1) * 10 + 90);
@@ -152,6 +197,7 @@ export async function easySearch({ bios, consoleId, region, wasmUrl, makeWorker,
     const giveUpAt = giveUp(refChecks);
 
     const rand = mulberry32((Math.random() * 2 ** 32) >>> 0);
+    const stats = learn(cache.candidates, bios.length);
     let tried = 0;
     let started = 0;
     let found = 0;
@@ -160,12 +206,13 @@ export async function easySearch({ bios, consoleId, region, wasmUrl, makeWorker,
       workers.map(async (w) => {
         while (!done()) {
           started++;
-          const settings = candidateSettings(consoleId, bios.length, rand);
+          const settings = candidateSettings(consoleId, bios.length, rand, stats);
           const checks = await run(w, corrupt(bios, settings).data, giveUpAt);
           if (signal?.aborted) return; // a cut-short probe says nothing
           tried++;
           const metrics = score(checks, refChecks, expected);
           cache.candidates.push({ settings, metrics, used: false });
+          addToStats(stats, settings, metrics);
           if (accept(metrics)) found++;
           onProgress?.({ phase: 'search', tried, maxTries, found });
         }

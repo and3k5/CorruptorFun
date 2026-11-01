@@ -53,6 +53,8 @@ pub struct Bus {
     /// I/O addresses with no emulated device, noted once each for the debug
     /// report.
     pub unknown_io: std::collections::BTreeSet<(u32, bool)>,
+    /// Print every I/O register access (ps1-cli --trace only).
+    pub io_trace: bool,
 }
 
 impl Bus {
@@ -81,6 +83,7 @@ impl Bus {
             access_cycles: 0,
             debug_out: Vec::new(),
             unknown_io: std::collections::BTreeSet::new(),
+            io_trace: false,
         }
     }
 
@@ -205,6 +208,14 @@ impl Bus {
     }
 
     fn io_read(&mut self, p: u32) -> u32 {
+        let v = self.io_read_inner(p);
+        if self.io_trace {
+            println!("    io read  {p:08X} = {v:08X}");
+        }
+        v
+    }
+
+    fn io_read_inner(&mut self, p: u32) -> u32 {
         match p {
             0x1F80_1000..=0x1F80_1020 => self.mem_ctrl[((p - 0x1F80_1000) / 4) as usize],
             0x1F80_1060 => self.ram_size,
@@ -298,6 +309,9 @@ impl Bus {
     }
 
     fn io_write(&mut self, p: u32, v: u32, _width: u32) {
+        if self.io_trace {
+            println!("    io write {p:08X} = {v:08X}");
+        }
         match p {
             0x1F80_1000..=0x1F80_1020 => self.mem_ctrl[((p - 0x1F80_1000) / 4) as usize] = v,
             0x1F80_1060 => self.ram_size = v,
@@ -318,8 +332,12 @@ impl Bus {
             }
             0x1F80_10F0 => self.dpcr = v,
             0x1F80_10F4 => {
+                // Writing 1 to a flag acknowledges it. Keep the master flag
+                // (bit 31) until it's recomputed, so the IRQ only fires when
+                // it rises, as on hardware: acking one channel while another
+                // is still flagged must not raise a new interrupt.
                 let ack = v & 0x7F00_0000;
-                self.dicr = (self.dicr & 0x7F00_0000 & !ack) | (v & 0x00FF_803F);
+                self.dicr = (self.dicr & 0xFF00_0000 & !ack) | (v & 0x00FF_803F);
                 self.update_dicr_master();
             }
             0x1F80_1100..=0x1F80_112F => self.timers.write(p, v),
