@@ -251,6 +251,20 @@ pub fn run(hw: &mut Hw) {
                     hw.iop_ram[a] = hw.sio2.fifo_out.pop_front().unwrap_or(0xFF);
                 }
             }
+            4 | 7 => {
+                // SPU2 core 0 / core 1 sound RAM.
+                let core = (i == 7) as usize;
+                for k in 0..words {
+                    let a = ((c.madr as usize) + k * 4) & 0x1F_FFFC;
+                    if c.chcr & 1 != 0 {
+                        let w = u32::from_le_bytes(hw.iop_ram[a..a + 4].try_into().unwrap());
+                        hw.spu2.dma_write(core, w);
+                    } else {
+                        let w = hw.spu2.dma_read(core);
+                        hw.iop_ram[a..a + 4].copy_from_slice(&w.to_le_bytes());
+                    }
+                }
+            }
             _ => {}
         }
         hw.iop_dma.finish(i);

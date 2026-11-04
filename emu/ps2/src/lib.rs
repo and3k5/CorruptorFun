@@ -16,6 +16,7 @@ pub mod iop;
 pub mod iopdma;
 pub mod romdir;
 pub mod sio2;
+pub mod spu2;
 pub mod vif;
 pub mod vu;
 
@@ -43,6 +44,10 @@ pub struct System {
     iop_acc: u32,
     pub files: Vec<romdir::RomFile>,
     pub pc_hist_ee: std::collections::BTreeMap<u32, u32>,
+    pub sample_pcs: bool,
+    /// A detected idle loop: [first NOP, branch address].
+    idle_loop: Option<(u32, u32)>,
+    pub idle_batches: u64,
 }
 
 impl System {
@@ -68,6 +73,9 @@ impl System {
             iop_acc: 0,
             files,
             pc_hist_ee: Default::default(),
+            sample_pcs: false,
+            idle_loop: None,
+            idle_batches: 0,
         };
         s.hw.cdvd.region = region;
         s.line_cycles = EE_HZ / if pal { 50 * 625 } else { 60 * 525 } * 2;
@@ -100,10 +108,18 @@ impl System {
                 self.vblank_start();
             }
             let mut c = 0;
+            if !self.ee.irq_ready() && self.ee_idle() {
+                // The kernel's idle thread spins on NOPs until an interrupt.
+                c = BATCH;
+                self.idle_batches += 1;
+            }
             while c < BATCH {
                 c += self.ee.step(&mut self.hw);
             }
             self.ee.add_count(c);
+            if self.sample_pcs {
+                *self.pc_hist_ee.entry(self.ee.pc & !0x7F).or_insert(0) += 1;
+            }
             self.hw.tick_ee_timers(c / 2, self.line_cycles / 2);
             // IOP: one cycle per 8 EE cycles.
             self.iop_acc += c;
@@ -111,6 +127,7 @@ impl System {
                 self.iop_acc -= self.iop.step(&mut self.hw) * 8;
             }
             self.hw.tick_iop_timers(c / 8, self.line_cycles / 8);
+            self.hw.spu2.tick(c / 8);
             hacc += c;
             if hacc >= self.line_cycles {
                 hacc -= self.line_cycles;
@@ -128,7 +145,6 @@ impl System {
         // End of vblank: next field begins.
         self.hw.ee_irq(hw::int::VBOF);
         self.hw.iop_irq(hw::iopint::EVBLANK);
-        *self.pc_hist_ee.entry(self.ee.pc & !0xFF).or_insert(0) += 1;
         self.frame_no += 1;
         if self.frame_no % if self.pal { 50 } else { 60 } == 0 {
             self.hw.cdvd.clock_secs += 1;
@@ -137,6 +153,48 @@ impl System {
             self.render_frame();
         }
         self.collect_trace();
+    }
+
+    /// Is the EE sitting in a loop of NOPs closed by `b` (nothing to do until
+    /// an interrupt)? Then a batch can be skipped without running it.
+    fn ee_idle(&mut self) -> bool {
+        let pc = self.ee.pc;
+        if self.ee.next_pc != pc.wrapping_add(4) {
+            return false;
+        }
+        if let Some((lo, hi)) = self.idle_loop {
+            if pc >= lo && pc <= hi && self.hw.ee_fetch(hi) >> 16 == 0x1000 {
+                return true;
+            }
+        }
+        if self.hw.ee_fetch(pc) != 0 {
+            return false;
+        }
+        let mut a = pc;
+        for _ in 0..16 {
+            a = a.wrapping_add(4);
+            let w = self.hw.ee_fetch(a);
+            if w == 0 {
+                continue;
+            }
+            if w >> 16 != 0x1000 || self.hw.ee_fetch(a.wrapping_add(4)) != 0 {
+                return false;
+            }
+            let t = a.wrapping_add(4).wrapping_add(((w as i16 as i32) << 2) as u32);
+            if t > pc || a - t > 64 {
+                return false;
+            }
+            let mut k = t;
+            while k < a {
+                if self.hw.ee_fetch(k) != 0 {
+                    return false;
+                }
+                k += 4;
+            }
+            self.idle_loop = Some((t, a));
+            return true;
+        }
+        false
     }
 
     fn vblank_start(&mut self) {
@@ -236,6 +294,14 @@ impl System {
             }
         }
         let _ = writeln!(r, "\nPMODE {:X} DISPFB1 {:X} DISPLAY1 {:X} DISPFB2 {:X} DISPLAY2 {:X}", self.hw.gs.pmode, self.hw.gs.dispfb[0], self.hw.gs.display[0], self.hw.gs.dispfb[1], self.hw.gs.display[1]);
+        {
+            let sp = &self.hw.spu2;
+            let peak = sp.out.iter().map(|x| x.unsigned_abs()).max().unwrap_or(0);
+            let _ = writeln!(r, "\n== SPU2 ==\nkey ons {}, notes {}, voices on {}, DMA words {:?}, buffered peak {}", sp.key_ons, sp.notes.len(), sp.active_voices(), sp.dma_words, peak);
+            for n in sp.notes.iter().take(200) {
+                let _ = writeln!(r, "  voice {:2} start {:06X} pitch {:04X} samples {:6} at {:8} end {}", n[7] >> 24, n[0], n[1], n[4], n[6], n[7] & 0xFF);
+            }
+        }
         let _ = writeln!(r, "\n== CDVD S-commands ==");
         for (c, n) in &self.hw.cdvd.s_counts {
             let _ = write!(r, "{c:02X}:{n} ");
@@ -341,6 +407,38 @@ pub extern "C" fn ps2_frame_height() -> u32 {
 #[no_mangle]
 pub extern "C" fn ps2_is_pal() -> u32 {
     sys().is_pal() as u32
+}
+
+/// Interleaved stereo i16 samples at 48 kHz since the last clear.
+#[no_mangle]
+pub extern "C" fn ps2_audio_ptr() -> *const i16 {
+    sys().hw.spu2.out.as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_audio_len() -> usize {
+    sys().hw.spu2.out.len()
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_audio_clear() {
+    sys().hw.spu2.out.clear();
+}
+
+/// Notes the SPU2 has played, 8 u32s each (see `spu2::Note`).
+#[no_mangle]
+pub extern "C" fn ps2_notes_ptr() -> *const u32 {
+    sys().hw.spu2.notes.as_ptr() as *const u32
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_notes_len() -> usize {
+    sys().hw.spu2.notes.len()
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_spu_clock() -> u32 {
+    sys().hw.spu2.clock
 }
 
 #[no_mangle]

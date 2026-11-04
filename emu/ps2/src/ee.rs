@@ -161,6 +161,11 @@ impl Ee {
         }
     }
 
+    /// An interrupt will be taken at the next step.
+    pub fn irq_ready(&self) -> bool {
+        self.interrupts_on() && self.cause & self.status & 0x8C00 != 0
+    }
+
     fn interrupts_on(&self) -> bool {
         self.status & 0x0001_0001 == 0x0001_0001 && self.status & 0x6 == 0
     }
@@ -182,7 +187,7 @@ impl Ee {
             self.exception(Exc::AdEL);
             return 2;
         }
-        let instr = hw.ee_read32(self.cur_pc);
+        let instr = hw.ee_fetch(self.cur_pc);
         self.pc = self.next_pc;
         self.next_pc = self.next_pc.wrapping_add(4);
         self.exec(instr, hw);

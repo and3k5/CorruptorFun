@@ -67,6 +67,7 @@ pub struct Hw {
     pub dmac: Dmac,
     pub vif0: crate::vif::Vif,
     pub vif1: crate::vif::Vif,
+    pub spu2: crate::spu2::Spu2,
     pub vu0: crate::vu::Vu,
     pub vu1: crate::vu::Vu,
     pub gs: Gs,
@@ -96,6 +97,10 @@ pub struct Hw {
     /// TLB lookup per 4 KB page: 0 = unmapped, else phys page | 1, | 2 for
     /// the scratchpad.
     pub tlb_map: Vec<u32>,
+    /// Instruction fetch cache: virtual page, and where it lives
+    /// (bit 31 set = BIOS offset, else RAM offset); u32::MAX = none.
+    fetch_page: u32,
+    fetch_base: u32,
     tlb_mapped: Vec<u32>,
     /// Plain registers we only store (and log the first time).
     pub regs: BTreeMap<u32, u32>,
@@ -110,7 +115,7 @@ pub struct Hw {
 
 #[inline(always)]
 fn rd32(m: &[u8], a: usize) -> u32 {
-    u32::from_le_bytes([m[a], m[a + 1], m[a + 2], m[a + 3]])
+    u32::from_le_bytes(m[a..a + 4].try_into().unwrap())
 }
 #[inline(always)]
 fn wr32(m: &mut [u8], a: usize, v: u32) {
@@ -138,6 +143,7 @@ impl Hw {
             dmac: Dmac::new(),
             vif0: Default::default(),
             vif1: Default::default(),
+            spu2: crate::spu2::Spu2::new(),
             vu0: Default::default(),
             vu1: Default::default(),
             gs: Gs::new(),
@@ -160,6 +166,8 @@ impl Hw {
             iop_cache_ctrl: 0,
             iop_irq_counts: [0; 32],
             tlb_map: vec![0; 1 << 20],
+            fetch_page: u32::MAX,
+            fetch_base: 0,
             tlb_mapped: Vec::new(),
             regs: BTreeMap::new(),
             unknown_io: BTreeMap::new(),
@@ -223,6 +231,7 @@ impl Hw {
     /// Rebuilds the page lookup from all TLB entries, each
     /// [PageMask, EntryHi, EntryLo0, EntryLo1].
     pub fn tlb_rebuild(&mut self, tlb: &[[u32; 4]]) {
+        self.fetch_page = u32::MAX;
         for p in self.tlb_mapped.drain(..) {
             self.tlb_map[p as usize] = 0;
         }
@@ -284,6 +293,26 @@ impl Hw {
             }
             _ => (self.ee_io_read32(p & !3) >> ((p & 2) * 8)) as u16,
         }
+    }
+
+    /// Instruction fetch, with the last code page's location cached.
+    #[inline(always)]
+    pub fn ee_fetch(&mut self, addr: u32) -> u32 {
+        if addr >> 12 == self.fetch_page {
+            let o = (self.fetch_base & 0x7FFF_FFFF) as usize + (addr & 0xFFF) as usize;
+            return if self.fetch_base & 0x8000_0000 != 0 { rd32(&self.bios, o) } else { rd32(&self.ram, o) };
+        }
+        let p = self.ee_xlate(addr);
+        if p & 0x8000_0000 == 0 {
+            if p < 0x0200_0000 {
+                self.fetch_page = addr >> 12;
+                self.fetch_base = p & !0xFFF;
+            } else if (0x1FC0_0000..0x2000_0000).contains(&p) && ((p - 0x1FC0_0000) as usize) < self.bios.len() {
+                self.fetch_page = addr >> 12;
+                self.fetch_base = 0x8000_0000 | ((p - 0x1FC0_0000) & !0xFFF);
+            }
+        }
+        self.ee_read32(addr)
     }
 
     pub fn ee_read32(&mut self, addr: u32) -> u32 {
@@ -728,11 +757,7 @@ impl Hw {
     }
 
     fn spu2_read(&mut self, p: u32) -> u16 {
-        match p & 0x7FF {
-            // STATX (core 0 / core 1): not busy, DMA ready.
-            0x344 | 0x744 => 0x80,
-            _ => *self.regs.get(&(p & !1 | 0x4000_0000)).unwrap_or(&0) as u16,
-        }
+        self.spu2.read16(p)
     }
 
     pub fn iop_write8(&mut self, addr: u32, v: u8) {
@@ -765,9 +790,7 @@ impl Hw {
                 self.iop_ram[a..a + 2].copy_from_slice(&v.to_le_bytes());
             }
             0x1F90_0000..=0x1F90_07FF => {
-                // SPU2: store, and drop the reset / busy bits right away.
-                let v = if p & 0x7FF == 0x19A || p & 0x7FF == 0x59A { v & !0x8000 } else { v };
-                self.regs.insert(p & !1 | 0x4000_0000, v as u32);
+                self.spu2.write16(p, v);
             }
             _ => {
                 let sh = (p & 2) * 8;
@@ -786,6 +809,10 @@ impl Hw {
         let p = Self::iop_phys(addr);
         match p {
             0..=0x007F_FFFF => wr32(&mut self.iop_ram, (p & 0x1F_FFFC) as usize, v),
+            0x1F90_0000..=0x1F90_07FF => {
+                self.spu2.write16(p, v as u16);
+                self.spu2.write16(p + 2, (v >> 16) as u16);
+            }
             _ => self.iop_io_write32(p, v, 0xFFFF_FFFF),
         }
     }
