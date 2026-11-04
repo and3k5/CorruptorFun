@@ -14,3 +14,7 @@ emu/target
 src/wasm
 *.ppm
 testdisc/tables.h
+*.rom0
+*.rom1
+*.ROM0
+*.ROM1

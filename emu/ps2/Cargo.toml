@@ -1,0 +1,13 @@
+[package]
+name = "ps2"
+version = "0.1.0"
+edition = "2021"
+description = "PlayStation 2 BIOS boot emulator for CorruptorFun"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "ps2-cli"
+path = "src/bin/cli.rs"
