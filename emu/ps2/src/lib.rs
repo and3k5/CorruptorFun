@@ -221,7 +221,7 @@ impl System {
         let _ = writeln!(
             r,
             "VIF1: {} MPG, {} UNPACK, {} DIRECT qwords, {} MSCAL; VU1 runs {}; GIF qwords path1-3 {:?}",
-            v.mpg_count, v.unpack_count, v.direct_qwords, v.mscal_count, self.hw.vu1_runs, &self.hw.gs.gif_qwords[1..]
+            v.mpg_count, v.unpack_count, v.direct_qwords, v.mscal_count, self.hw.vu1.runs, &self.hw.gs.gif_qwords[1..]
         );
         let _ = writeln!(r, "IOP interrupts: {:?}", self.hw.iop_irq_counts.iter().enumerate().filter(|(_, c)| **c > 0).collect::<Vec<_>>());
         let _ = writeln!(r, "IOP timers: {:?}", self.hw.iop_timers.iter().map(|t| (t.count, t.mode, t.target)).collect::<Vec<_>>());

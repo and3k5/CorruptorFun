@@ -276,6 +276,6 @@ impl Gs {
 
     /// The displayed picture (read circuit 2 if enabled, else 1) as RGBA.
     pub fn render(&self, out: &mut Vec<u8>) -> (u32, u32) {
-        self.draw.display(self.pmode, &self.dispfb, &self.display, self.bgcolor, out)
+        self.draw.display(self.pmode, self.smode2, &self.dispfb, &self.display, self.bgcolor, out)
     }
 }

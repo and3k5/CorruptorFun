@@ -44,9 +44,6 @@ pub struct Ee {
     pub f: [u32; 32],
     pub acc: f32,
     pub fcr31: u32,
-    // VU0 registers (macro mode)
-    pub vf: [[u32; 4]; 32],
-    pub vi: [u32; 32],
     pub cycles: u64,
     pub trace: Vec<String>,
     pub syscalls: BTreeMap<i32, u32>,
@@ -110,8 +107,6 @@ impl Ee {
             f: [0; 32],
             acc: 0.0,
             fcr31: 0,
-            vf: [[0; 4]; 32],
-            vi: [0; 32],
             cycles: 0,
             trace: Vec::new(),
             syscalls: BTreeMap::new(),
@@ -300,7 +295,7 @@ impl Ee {
             0x0F => self.s(rt, sx32(imm << 16)),
             0x10 => self.cop0_op(i, hw, rs, rt, rd),
             0x11 => self.cop1_op(i, rs, rt, rd),
-            0x12 => self.cop2_op(i, rs, rt, rd),
+            0x12 => self.cop2_op(i, hw, rs, rt, rd),
             0x14 => self.brl(self.g(rs) == self.g(rt), imm),
             0x15 => self.brl(self.g(rs) != self.g(rt), imm),
             0x16 => self.brl(self.g(rs) as i64 <= 0, imm),
@@ -449,9 +444,7 @@ impl Ee {
             0x36 => {
                 let a = self.g32(rs).wrapping_add(se as u32);
                 let v = hw.ee_read128(a);
-                if rt != 0 {
-                    self.vf[rt] = [v as u32, (v >> 32) as u32, (v >> 64) as u32, (v >> 96) as u32];
-                }
+                hw.vu0.set_vf_bits(rt, [v as u32, (v >> 32) as u32, (v >> 64) as u32, (v >> 96) as u32]);
             }
             0x37 => {
                 let a = self.g32(rs).wrapping_add(se as u32);
@@ -466,7 +459,7 @@ impl Ee {
             }
             0x3E => {
                 let a = self.g32(rs).wrapping_add(se as u32);
-                let f = self.vf[rt];
+                let f = hw.vu0.vf_bits(rt);
                 let v = f[0] as u128 | (f[1] as u128) << 32 | (f[2] as u128) << 64 | (f[3] as u128) << 96;
                 hw.ee_write128(a, v);
             }
@@ -767,37 +760,27 @@ impl Ee {
         }
     }
 
-    fn cop2_op(&mut self, i: u32, rs: usize, rt: usize, rd: usize) {
+    fn cop2_op(&mut self, i: u32, hw: &mut Hw, rs: usize, rt: usize, rd: usize) {
         match rs {
             0x01 => {
-                let f = self.vf[rd];
+                let f = hw.vu0.vf_bits(rd);
                 let v = f[0] as u128 | (f[1] as u128) << 32 | (f[2] as u128) << 64 | (f[3] as u128) << 96;
                 self.sq(rt, v);
             }
             0x02 => {
-                let v = match rd {
-                    0..=15 => self.vi[rd] & 0xFFFF,
-                    29 => 0, // VPU-STAT: both VUs idle
-                    _ => self.vi[rd],
-                };
+                let v = crate::vu::read_ctrl(hw, rd);
                 self.s(rt, sx32(v));
             }
             0x05 => {
-                if rd != 0 {
-                    let v = self.q(rt);
-                    self.vf[rd] = [v as u32, (v >> 32) as u32, (v >> 64) as u32, (v >> 96) as u32];
-                }
+                let v = self.q(rt);
+                hw.vu0.set_vf_bits(rd, [v as u32, (v >> 32) as u32, (v >> 64) as u32, (v >> 96) as u32]);
             }
             0x06 => {
                 let v = self.g32(rt);
-                match rd {
-                    0 => {}
-                    1..=15 => self.vi[rd] = v & 0xFFFF,
-                    _ => self.vi[rd] = v,
-                }
+                crate::vu::write_ctrl(hw, rd, v);
             }
             0x08 => {
-                // BC2F / BC2T: VU0 never busy.
+                // BC2F / BC2T: VU0 never busy (programs run to completion).
                 let imm = i & 0xFFFF;
                 match rt {
                     0 => self.br(true, imm),
@@ -807,7 +790,7 @@ impl Ee {
                     _ => {}
                 }
             }
-            0x10..=0x1F => crate::vu::macro_op(self, i),
+            0x10..=0x1F => crate::vu::macro_op(hw, i),
             _ => self.note(&format!("cop2 rs {rs:02X}")),
         }
     }

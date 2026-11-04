@@ -753,7 +753,7 @@ impl Draw {
 
     // ----------------------------------------------------------- display --
 
-    pub fn display(&self, pmode: u64, dispfb: &[u64; 2], display: &[u64; 2], bg: u64, out: &mut Vec<u8>) -> (u32, u32) {
+    pub fn display(&self, pmode: u64, smode2: u64, dispfb: &[u64; 2], display: &[u64; 2], bg: u64, out: &mut Vec<u8>) -> (u32, u32) {
         let en = [pmode & 1 != 0, pmode & 2 != 0];
         let main = if en[1] { 1 } else { 0 };
         let d = display[main];
@@ -780,8 +780,13 @@ impl Draw {
         };
         let alp = bits(pmode, 8, 8);
         let mmod = pmode >> 5 & 1 != 0;
+        // Interlaced field mode: the buffer holds one field, each line shown twice.
+        let field = smode2 & 3 == 3;
         for y in 0..h {
+            let oy = y;
+            let fy = if field { y >> 1 } else { y };
             for x in 0..w {
+                let y = fy;
                 let mut c = bg as u32 & 0xFF_FFFF;
                 if en[1] {
                     c = read(1, x, y);
@@ -796,7 +801,7 @@ impl Draw {
                         c = c1;
                     }
                 }
-                let o = ((y * w + x) * 4) as usize;
+                let o = ((oy * w + x) * 4) as usize;
                 out[o] = c as u8;
                 out[o + 1] = (c >> 8) as u8;
                 out[o + 2] = (c >> 16) as u8;
