@@ -152,3 +152,42 @@ test('wordmarks: finds the letters and rebuilds the picture from them', () => {
   const missing = patchWordmarks(rom, { playstation: ['Wii'] });
   assert.match(missing.notes.join(' '), /left out W/);
 });
+
+test('logo drawing: brushes, fill and resize stay on the palette', async () => {
+  const { createDrawing, stamp, strokeLine, floodFill, resizeDrawing, drawingToImage, imageToDrawing, coloursSetting, visibleColour } = await import('../src/lib/ps1custom/draw.js');
+  const d = createDrawing(32, 14);
+  // A brush of n is n pixels across, odd or even.
+  for (const n of [1, 2, 3, 4, 7]) {
+    const t = createDrawing(32, 14);
+    stamp(t, 16.3, 7.4, n, 1);
+    let minX = 99, maxX = -1;
+    t.pixels.forEach((v, i) => {
+      if (!v) return;
+      minX = Math.min(minX, i % 32);
+      maxX = Math.max(maxX, i % 32);
+    });
+    assert.equal(maxX - minX + 1, n, `brush ${n}`);
+  }
+  // A line leaves no gaps.
+  strokeLine(d, 0.5, 0.5, 31.5, 0.5, 1, 2);
+  assert.ok(d.pixels.slice(0, 32).every((v) => v === 2));
+  // A closed box fills inside only.
+  for (const [a, b, c, e] of [[4, 4, 12, 4], [12, 4, 12, 12], [12, 12, 4, 12], [4, 12, 4, 4]]) strokeLine(d, a + 0.5, b + 0.5, c + 0.5, e + 0.5, 1, 3);
+  floodFill(d, 8, 8, 4);
+  assert.equal(d.pixels[8 * 32 + 8], 4);
+  assert.equal(d.pixels[8 * 32 + 20], 0);
+  // The model keeps every drawn colour exactly, at the drawing's size.
+  const r = imageToLogo(drawingToImage(d), { colours: coloursSetting(d) });
+  assert.equal(r.gw, 32);
+  assert.equal(r.gh, 14);
+  const at = (x, y) => [...r.preview.slice((y * 32 + x) * 4, (y * 32 + x) * 4 + 3)];
+  assert.deepEqual(at(8, 8), d.palette[4]);
+  assert.deepEqual(at(4, 4), d.palette[3]);
+  // And back: a logo preview becomes a drawing with the same colours.
+  const back = imageToDrawing({ width: 32, height: 14, data: r.preview });
+  assert.equal(back.pixels[8 * 32 + 20], 0);
+  assert.deepEqual(back.palette[back.pixels[8 * 32 + 8]], d.palette[4]);
+  const big = resizeDrawing(d, 64, 28);
+  assert.equal(big.pixels[16 * 64 + 16], 4);
+  assert.deepEqual(visibleColour([0, 0, 0]), [32, 32, 32]);
+});

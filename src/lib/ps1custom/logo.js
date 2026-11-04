@@ -66,6 +66,18 @@ function sampleGrid(img, gw, gh, { blackCutoff }) {
 function quantize(cells, k) {
   const pts = cells.filter(Boolean);
   if (!pts.length) return { idx: cells.map(() => -1), palette: [] };
+  // Few enough colours already (a drawing, or pixel art at its own size):
+  // keep them exactly. Median cut could spend boxes splitting one colour.
+  const exact = new Map();
+  for (const p of pts) {
+    const key = p.map(Math.round).join(',');
+    if (!exact.has(key)) exact.set(key, exact.size);
+    if (exact.size > k) break;
+  }
+  if (exact.size <= k) {
+    const palette = [...exact.keys()].map((s) => s.split(',').map(Number));
+    return { idx: cells.map((c) => (c ? exact.get(c.map(Math.round).join(',')) : -1)), palette };
+  }
   let boxes = [pts];
   while (boxes.length < k) {
     // Split the box with the widest channel range.

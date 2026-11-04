@@ -11,7 +11,7 @@ export function defaultCustom() {
   return {
     texts: { sony: 'SONY', computer: 'COMPUTER', entertainment: 'ENTERTAINMENT', playstation: 'PlayStation' },
     license: null, // [line1, line2], or null for the region's own
-    logo: null, // { name, tmd, preview, triangles, bytes, source, opts }
+    logo: null, // { name, tmd, preview, triangles, bytes, source, opts, drawing } (drawing: see draw.js)
     sounds: [null, null, null], // { name, pcm, rate, loop, seconds }
   };
 }

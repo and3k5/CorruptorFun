@@ -33,7 +33,13 @@ keep re-corrupting the untouched original.
   drawn with a similar system font); the license text and the logo go on the
   test disc. A logo picture becomes pixel art made of lit flat triangles,
   the only kind the BIOS draws, within its limits (about 590 triangles,
-  14 KB). Sounds in any format the browser can decode are re-encoded as SPU
+  14 KB). The logo can also be drawn in a full-screen pixel editor
+  (`src/components/LogoDraw.vue`, `src/lib/ps1custom/draw.js`) that works
+  with mouse, pen and touch: freehand pen with stroke width, eraser, fill,
+  colour picker, an editable palette, undo/redo, pinch / Ctrl + wheel zoom
+  and pan. It draws without blending, so every colour is kept exactly, and
+  it counts the triangles as you draw; it can also start from the pixel art
+  an uploaded picture became. Sounds in any format the browser can decode are re-encoded as SPU
   ADPCM into the room the original samples took (about 42 KB), at a lower
   rate if needed. Sounds can be recorded with the microphone. A headless boot
   logs every SPU note (`src/lib/ps1custom/notes.js`) to show how fast and how
