@@ -76,6 +76,40 @@ async function probe({ bios, region, frames, giveUpAt }) {
   return checks;
 }
 
+// Boots until the game starts (or `frames`) and returns the notes the SPU
+// played, the sound RAM and when the boot sound ends (SPU clock), to see
+// how the BIOS plays each sample.
+async function notes({ bios, disc, region, frames }) {
+  const { exports: wasm } = await WebAssembly.instantiate(await module, {});
+  const copyIn = (bytes) => {
+    const ptr = wasm.alloc(bytes.length);
+    new Uint8Array(wasm.memory.buffer).set(bytes, ptr);
+    return ptr;
+  };
+  const b = new Uint8Array(bios);
+  wasm.ps1_init(copyIn(b), b.length);
+  if (disc) {
+    const d = new Uint8Array(disc);
+    wasm.ps1_set_disc(copyIn(d), d.length);
+  }
+  wasm.ps1_set_region(region.charCodeAt(0));
+  wasm.ps1_set_render(0);
+  // Notes may ring on after the hand-off to the game; a game would soon
+  // stop them, so a second after it is where the boot sound ends.
+  let until = null;
+  for (let f = 0, end = frames; f < end; f++) {
+    wasm.ps1_run_frame();
+    wasm.ps1_audio_clear();
+    if (until === null && wasm.ps1_game_started()) {
+      until = wasm.ps1_spu_clock() + 44100;
+      end = Math.min(frames, f + 62);
+    }
+  }
+  const log = new Uint32Array(wasm.memory.buffer, wasm.ps1_notes_ptr(), wasm.ps1_notes_len() * 8).slice();
+  const ram = new Uint8Array(wasm.memory.buffer, wasm.ps1_spu_ram_ptr(), 512 * 1024).slice();
+  return { log, ram, until };
+}
+
 onmessage = async (ev) => {
   const msg = ev.data;
   try {
@@ -86,8 +120,11 @@ onmessage = async (ev) => {
     } else if (msg.type === 'probe') {
       const checks = await probe(msg);
       postMessage({ type: 'result', id: msg.id, checks });
+    } else if (msg.type === 'notes') {
+      const r = await notes(msg);
+      postMessage({ type: 'notes', id: msg.id, ...r }, [r.log.buffer, r.ram.buffer]);
     }
   } catch (e) {
-    postMessage({ type: 'result', id: msg.id, checks: [], error: e.message });
+    postMessage({ type: msg.type === 'notes' ? 'notes' : 'result', id: msg.id, checks: [], error: e.message });
   }
 };

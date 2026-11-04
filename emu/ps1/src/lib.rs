@@ -307,3 +307,26 @@ pub extern "C" fn ps1_game_started() -> u32 {
 pub extern "C" fn ps1_is_pal() -> u32 {
     sys().bus.gpu.is_pal() as u32
 }
+
+/// The notes the SPU has played since power on, 8 u32s each (see `spu::Note`).
+#[no_mangle]
+pub extern "C" fn ps1_notes_ptr() -> *const u32 {
+    sys().bus.spu.notes.as_ptr() as *const u32
+}
+
+#[no_mangle]
+pub extern "C" fn ps1_notes_len() -> usize {
+    sys().bus.spu.notes.len()
+}
+
+/// Sound RAM (512 KB).
+#[no_mangle]
+pub extern "C" fn ps1_spu_ram_ptr() -> *const u8 {
+    sys().bus.spu.ram.as_ptr()
+}
+
+/// SPU output samples (44.1 kHz) since power on.
+#[no_mangle]
+pub extern "C" fn ps1_spu_clock() -> u32 {
+    sys().bus.spu.clock
+}

@@ -155,7 +155,8 @@ export function resample(src, from, to) {
 
 /**
  * Replaces samples in a copy of the BIOS. `sounds` maps sample index (1..)
- * to { pcm: Float32Array (-1..1, mono), rate, loop }. Returns
+ * to { pcm: Float32Array (-1..1, mono), rate, loop, shift } (shift: semitones
+ * to play every note higher, so the BIOS plays the sound faster). Returns
  * { rom, notes, used } where `used` says, per replaced sample, the rate,
  * seconds kept and whether it was cut.
  */
@@ -217,8 +218,11 @@ export function patchSamples(rom, sounds) {
   // octave up to sound at the same pitch.
   for (const t of vab.tones) {
     if (!encoded[t.vag]) continue;
+    // A shift of the user's raises every note by that many semitones: a
+    // lower centre note.
     const octaves = Math.round(Math.log2(44100 / used[t.vag].rate));
-    out[t.offset + 4] = Math.min(127, rom[t.offset + 4] + 12 * octaves);
+    const shift = Math.round(sounds[t.vag].shift || 0);
+    out[t.offset + 4] = Math.max(0, Math.min(127, rom[t.offset + 4] + 12 * octaves - shift));
   }
   for (const i of keys) {
     if (used[i].cut) notes.push(`Sample ${i}: kept the first ${used[i].seconds.toFixed(2)} s of ${used[i].of.toFixed(2)} s.`);

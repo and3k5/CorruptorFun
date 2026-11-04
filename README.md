@@ -35,8 +35,14 @@ keep re-corrupting the untouched original.
   the only kind the BIOS draws, within its limits (about 590 triangles,
   14 KB). Sounds in any format the browser can decode are re-encoded as SPU
   ADPCM into the room the original samples took (about 42 KB), at a lower
-  rate if needed. Customizations are kept in IndexedDB, and corruptions start
-  from the customized BIOS.
+  rate if needed. Sounds can be recorded with the microphone. A headless boot
+  logs every SPU note (`src/lib/ps1custom/notes.js`) to show how fast and how
+  long the BIOS plays each sample: the length to aim for (with a countdown
+  and auto stop while recording), a preview of the original and of yours as
+  the longest note plays it, and a speed setting (by default every note is
+  raised by whole octaves to about the speed you recorded, since the BIOS
+  plays its samples 2 to 4 times slower). Customizations are kept in
+  IndexedDB, and corruptions start from the customized BIOS.
 - **PlayStation 2:** in progress. You can already store, corrupt and download
   PS2 BIOS files.
 

@@ -31,7 +31,19 @@ struct Voice {
     phase: Phase,
     env: i32,
     env_wait: i32,
+    /// Index of this voice's current entry in `Spu::notes`.
+    note: Option<usize>,
+    /// Sound RAM samples read since key on, in 1/4096ths.
+    read: u64,
 }
+
+/// One note the SPU played, for working out how the BIOS uses each sample:
+/// `[start address, pitch at key on, lowest pitch, highest pitch, samples
+/// sounded, sound-RAM samples read (pitch-weighted), when it was keyed on
+/// (`Spu::clock`), how it ended (0 still on, 1 released, 2 the sample ended,
+/// 3 keyed on again)]`.
+pub type Note = [u32; 8];
+const MAX_NOTES: usize = 1024;
 
 pub struct Spu {
     pub ram: Vec<u8>,
@@ -42,6 +54,10 @@ pub struct Spu {
     sample_timer: u32,
     /// Interleaved stereo i16 samples produced since the last drain.
     pub out: Vec<i16>,
+    /// Every note keyed on since power on (up to MAX_NOTES).
+    pub notes: Vec<Note>,
+    /// Output samples since power on.
+    pub clock: u32,
 }
 
 impl Spu {
@@ -54,6 +70,8 @@ impl Spu {
             endx: 0,
             sample_timer: 0,
             out: Vec::with_capacity(4096),
+            notes: Vec::new(),
+            clock: 0,
         }
     }
 
@@ -120,11 +138,18 @@ impl Spu {
         for i in 0..24 {
             if mask & (1 << i) != 0 {
                 let start = self.reg(i * 16 + 6) as u32 * 8;
+                let pitch = (self.reg(i * 16 + 4) as u32).min(0x4000);
+                self.end_note(i, 3);
+                if self.notes.len() < MAX_NOTES {
+                    self.voices[i].note = Some(self.notes.len());
+                    self.notes.push([start, pitch, pitch, pitch, 0, 0, self.clock, 0]);
+                }
                 let v = &mut self.voices[i];
                 v.start = start;
                 v.addr = start;
                 v.repeat = start;
                 v.counter = 0;
+                v.read = 0;
                 v.prev = [0, 0];
                 v.phase = Phase::Attack;
                 v.env = 0;
@@ -141,6 +166,12 @@ impl Spu {
                 self.voices[i].phase = Phase::Release;
                 self.voices[i].env_wait = 0;
             }
+        }
+    }
+
+    fn end_note(&mut self, i: usize, how: u32) {
+        if let Some(n) = self.voices[i].note.take() {
+            self.notes[n][7] = how;
         }
     }
 
@@ -215,6 +246,19 @@ impl Spu {
             }
             self.adsr_step(i);
             let pitch = (self.reg(i * 16 + 4) as u32).min(0x4000);
+            if self.voices[i].phase == Phase::Off {
+                // The release just ended.
+                self.end_note(i, 1);
+                continue;
+            }
+            if let Some(n) = self.voices[i].note {
+                let e = &mut self.notes[n];
+                e[2] = e[2].min(pitch);
+                e[3] = e[3].max(pitch);
+                e[4] += 1;
+                self.voices[i].read += pitch as u64;
+                e[5] = (self.voices[i].read >> 12) as u32;
+            }
             let v = &self.voices[i];
             let idx = (v.counter >> 12) as usize;
             let s = v.decoded[idx.min(27)] as i32 * v.env >> 15;
@@ -239,6 +283,7 @@ impl Spu {
                 }
                 self.decode_block(i);
                 if self.voices[i].phase == Phase::Off {
+                    self.end_note(i, 2);
                     break;
                 }
             }
@@ -254,6 +299,7 @@ impl Spu {
         self.sample_timer += cycles;
         while self.sample_timer >= CYCLES_PER_SAMPLE {
             self.sample_timer -= CYCLES_PER_SAMPLE;
+            self.clock = self.clock.wrapping_add(1);
             let enabled = self.reg(0x1AA) & 0x8000 != 0;
             let unmuted = self.reg(0x1AA) & 0x4000 != 0;
             let (l, r) = if enabled { self.sample() } else { (0, 0) };
@@ -323,5 +369,33 @@ mod tests {
         s.tick(768 * 44100);
         assert_eq!(s.read16(base + 0xC), 0);
         assert_eq!(s.active_voices(), 0);
+    }
+
+    #[test]
+    fn notes_are_logged() {
+        let mut s = Spu::new();
+        let mut block = [0x77u8; 16];
+        block[0] = 0;
+        block[1] = 0x03;
+        s.ram[0x1000..0x1010].copy_from_slice(&block);
+        let base = 0x1F80_1C00;
+        s.write16(base + 0x1AA, 0xC000);
+        s.write16(base + 4, 0x0800); // half speed
+        s.write16(base + 6, 0x1000 / 8);
+        s.write16(base + 8, 0x000F);
+        s.write16(base + 10, 0x0000); // fastest release
+        s.tick(768 * 10);
+        s.write16(base + 0x188, 1);
+        s.tick(768 * 1000);
+        s.write16(base + 0x18C, 1);
+        s.tick(768 * 44100);
+        assert_eq!(s.notes.len(), 1);
+        let n = s.notes[0];
+        assert_eq!(n[0], 0x1000);
+        assert_eq!(n[1], 0x0800);
+        assert_eq!(n[6], 10);
+        assert!(n[4] >= 1000 && n[4] < 1100);
+        assert_eq!(n[5], n[4] / 2);
+        assert_eq!(n[7], 1);
     }
 }
