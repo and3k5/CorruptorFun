@@ -18,7 +18,7 @@ import {
   getFirstEncodableAudioCodec,
 } from 'mediabunny';
 
-const RATE = 44100; // the core's stereo output rate
+let RATE = 44100; // the core's stereo output rate (PS2: 48 kHz)
 
 let cancelled = false;
 
@@ -41,25 +41,28 @@ async function pickFormat(width, height) {
 
 async function render(msg) {
   const { width, height, seconds, runGame } = msg;
+  RATE = msg.rate || 44100;
   if (typeof VideoEncoder === 'undefined') throw new Error('This browser cannot encode video (no WebCodecs). Try a recent Chrome, Edge, Firefox or Safari.');
   const picked = await pickFormat(width, height);
   if (!picked) throw new Error(`This browser cannot encode video at ${width}×${height}. Try a smaller size.`);
 
   const { instance } = await WebAssembly.instantiateStreaming(fetch(msg.wasmUrl), {});
   const wasm = instance.exports;
+  const core = msg.core || 'ps1';
+  const fn = (name) => wasm[`${core}_${name}`] || (() => 0);
   const copyIn = (bytes) => {
     const ptr = wasm.alloc(bytes.length);
     new Uint8Array(wasm.memory.buffer).set(bytes, ptr);
     return ptr;
   };
   const bios = new Uint8Array(msg.bios);
-  wasm.ps1_init(copyIn(bios), bios.length);
+  fn('init')(copyIn(bios), bios.length);
   if (msg.disc) {
     const disc = new Uint8Array(msg.disc);
-    wasm.ps1_set_disc(copyIn(disc), disc.length);
+    fn('set_disc')(copyIn(disc), disc.length);
   }
-  wasm.ps1_set_region(msg.region.charCodeAt(0));
-  wasm.ps1_set_render(1);
+  fn('set_region')(msg.region.charCodeAt(0));
+  fn('set_render')(1);
 
   // The core's picture changes size during the boot (and between modes), so
   // each frame is stretched onto a fixed 4:3 canvas, pixels kept sharp.
@@ -91,24 +94,24 @@ async function render(msg) {
         postMessage({ type: 'cancelled' });
         return;
       }
-      wasm.ps1_run_frame();
-      const dt = 1 / (wasm.ps1_is_pal() === 1 ? 50 : 60);
+      fn('run_frame')();
+      const dt = 1 / (fn('is_pal')() === 1 ? 50 : 60);
 
-      const w = wasm.ps1_frame_width();
-      const h = wasm.ps1_frame_height();
+      const w = fn('frame_width')();
+      const h = fn('frame_height')();
       if (frame.width !== w || frame.height !== h) {
         frame = new OffscreenCanvas(w, h);
         frameCtx = frame.getContext('2d');
       }
-      const px = new Uint8ClampedArray(wasm.memory.buffer, wasm.ps1_frame_ptr(), w * h * 4);
+      const px = new Uint8ClampedArray(wasm.memory.buffer, fn('frame_ptr')(), w * h * 4);
       frameCtx.putImageData(new ImageData(px.slice(), w, h), 0, 0);
       ctx.drawImage(frame, 0, 0, width, height);
       await video.add(t, dt);
 
-      const len = wasm.ps1_audio_len();
+      const len = fn('audio_len')();
       if (len) {
-        const pcm = new Int16Array(wasm.memory.buffer, wasm.ps1_audio_ptr(), len).slice();
-        wasm.ps1_audio_clear();
+        const pcm = new Int16Array(wasm.memory.buffer, fn('audio_ptr')(), len).slice();
+        fn('audio_clear')();
         if (audio) {
           const sample = new AudioSample({ data: pcm, format: 's16', numberOfChannels: 2, sampleRate: RATE, timestamp: samples / RATE });
           await audio.add(sample);
@@ -119,7 +122,7 @@ async function render(msg) {
 
       t += dt;
       n++;
-      if (!runGame && wasm.ps1_game_started()) {
+      if (!runGame && fn('game_started')()) {
         reason = 'hand-off';
         break;
       }

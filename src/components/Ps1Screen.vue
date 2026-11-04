@@ -1,12 +1,14 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue';
-import wasmUrl from '../wasm/ps1.wasm?url';
+import ps1WasmUrl from '../wasm/ps1.wasm?url';
+import ps2WasmUrl from '../wasm/ps2.wasm?url';
 import workletUrl from '../emu/ps1-audio.worklet.js?url&no-inline';
-import { findAscii } from '../lib/consoles.js';
+import { findAscii, ps2Version } from '../lib/consoles.js';
 
-// Runs the corrupted BIOS in our own PS1 core (Rust → WebAssembly) inside a
-// worker, draws its frames and plays its audio.
+// Runs the corrupted BIOS in our own PS1 or PS2 core (Rust → WebAssembly)
+// inside a worker, draws its frames and plays its audio.
 const props = defineProps({
+  core: { type: String, default: 'ps1' }, // 'ps1' or 'ps2'
   bios: { type: Object, required: true }, // corrupted Uint8Array
   disc: { type: Object, default: null }, // raw data track Uint8Array
   region: { type: String, default: 'E' },
@@ -17,6 +19,8 @@ const props = defineProps({
   mini: { type: Boolean, default: false },
 });
 
+const wasmUrl = props.core === 'ps2' ? ps2WasmUrl : ps1WasmUrl;
+const RATE = props.core === 'ps2' ? 48000 : 44100; // the core's audio output
 const canvas = ref(null);
 const holder = ref(null);
 const status = ref('Press Boot to run the BIOS.');
@@ -86,10 +90,10 @@ function setupAudio() {
   if (audioReady) return audioReady;
   audioReady = (async () => {
     try {
-      const ctx = new AudioContext({ sampleRate: 44100, latencyHint: 'interactive' });
+      const ctx = new AudioContext({ sampleRate: RATE, latencyHint: 'interactive' });
       ctx.resume();
       await ctx.audioWorklet.addModule(workletUrl);
-      const node = new AudioWorkletNode(ctx, 'ps1-audio', { outputChannelCount: [2] });
+      const node = new AudioWorkletNode(ctx, 'ps1-audio', { outputChannelCount: [2], processorOptions: { rate: RATE } });
       const gain = ctx.createGain();
       gain.gain.value = muted.value ? 0 : 1;
       node.connect(gain).connect(ctx.destination);
@@ -117,6 +121,10 @@ function stop(text = 'Stopped.') {
 }
 
 function reportHeader() {
+  if (props.core === 'ps2') {
+    const v = ps2Version(props.bios);
+    return `BIOS: ${v || 'unknown'}\nRegion: ${props.region}`;
+  }
   const at = findAscii(props.bios, 'System ROM Version');
   let version = 'unknown';
   if (at >= 0) {
@@ -148,7 +156,7 @@ async function copyReport() {
 function downloadReport() {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([report.value], { type: 'text/plain' }));
-  a.download = 'ps1-debug-report.txt';
+  a.download = `${props.core}-debug-report.txt`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
@@ -184,7 +192,7 @@ function renderVideo() {
     } else if (m.type === 'done') {
       finish();
       const blob = new Blob([m.buffer], { type: m.mime });
-      video.value = { url: URL.createObjectURL(blob), name: `ps1-boot.${m.ext}`, mb: (blob.size / 1048576).toFixed(1) };
+      video.value = { url: URL.createObjectURL(blob), name: `${props.core}-boot.${m.ext}`, mb: (blob.size / 1048576).toFixed(1) };
       const why = m.reason === 'hand-off' ? ', up to where the BIOS hands over to the game' : '';
       renderNote.value = `Done: ${m.seconds.toFixed(1)} s${why}${m.sound ? '' : ' (no sound: this browser cannot encode audio)'}.`;
     } else if (m.type === 'cancelled') {
@@ -201,7 +209,7 @@ function renderVideo() {
   };
   const transfer = [bios];
   if (disc) transfer.push(disc);
-  w.postMessage({ type: 'render', wasmUrl: new URL(wasmUrl, location.href).href, bios, disc, region: props.region, runGame: props.runGame, seconds, width, height }, transfer);
+  w.postMessage({ type: 'render', core: props.core, rate: RATE, wasmUrl: new URL(wasmUrl, location.href).href, bios, disc, region: props.region, runGame: props.runGame, seconds, width, height }, transfer);
 }
 
 function cancelRender() {
@@ -259,10 +267,11 @@ async function boot() {
   const transfer = [bios];
   if (disc) transfer.push(disc);
   if (audioPort) transfer.push(audioPort);
-  w.postMessage({ type: 'start', wasmUrl: new URL(wasmUrl, location.href).href, bios, disc, region: props.region, runGame: props.runGame, audioPort }, transfer);
+  w.postMessage({ type: 'start', core: props.core, wasmUrl: new URL(wasmUrl, location.href).href, bios, disc, region: props.region, runGame: props.runGame, audioPort }, transfer);
   lastFrame = performance.now();
   watchdog = setInterval(() => {
-    if (running.value && performance.now() - lastFrame > 4000) {
+    // A PS2 frame can take a while on a slow device, so it gets longer.
+    if (running.value && performance.now() - lastFrame > (props.core === 'ps2' ? 15000 : 4000)) {
       stop('The emulator stopped responding. Try another corruption.');
     }
   }, 1000);
@@ -280,7 +289,7 @@ function backToScreen() {
 function snapshot() {
   const a = document.createElement('a');
   a.href = canvas.value.toDataURL('image/png');
-  a.download = 'ps1-boot.png';
+  a.download = `${props.core}-boot.png`;
   a.click();
 }
 
@@ -308,7 +317,7 @@ defineExpose({ boot, stop });
   <div class="emu">
     <div ref="holder" class="holder">
       <div class="screen" :class="{ mini: mini && running && offscreen }">
-        <canvas ref="canvas" width="320" height="240" aria-label="PlayStation output" />
+        <canvas ref="canvas" width="320" height="240" :aria-label="core === 'ps2' ? 'PlayStation 2 output' : 'PlayStation output'" />
         <div v-if="!running" class="overlay note">{{ status }}</div>
         <button v-if="mini && running && offscreen" class="back" aria-label="Scroll back to the screen" @click="backToScreen" />
       </div>
@@ -361,7 +370,7 @@ defineExpose({ boot, stop });
         <span class="note">{{ reportNote }}</span>
       </div>
     </div>
-    <p class="note keys">
+    <p v-if="core === 'ps1'" class="note keys">
       Pad: arrows, Enter = Start, Backspace = Select, Z = ✕, X = ○, A = □, S = △, Q/W = L1/R1, E/R = L2/R2.
     </p>
   </div>

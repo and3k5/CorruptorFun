@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
-import { CONSOLES, CONSOLE_LIST, detectConsole, ps1Region } from '../lib/consoles.js';
+import { CONSOLES, CONSOLE_LIST, detectConsole, ps1Region, ps2Region } from '../lib/consoles.js';
 import { DEFAULT_SETTINGS, ENGINES, clampRange, corrupt } from '../lib/corrupt.js';
 import { deleteBios, listBios, loadBios, loadCustom, saveBios, saveCustom } from '../lib/storage.js';
 import { loadDisc } from '../lib/disc.js';
@@ -54,7 +54,10 @@ let easyCacheKey = '';
 const cons = computed(() => CONSOLES[consoleId.value]);
 const forConsole = computed(() => library.value.filter((b) => b.consoleId === consoleId.value));
 const range = computed(() => (current.value ? clampRange(settings, current.value.data.length) : { start: 0, end: 0 }));
-const region = computed(() => (current.value && consoleId.value === 'ps1' ? ps1Region(current.value.data) : 'E'));
+const region = computed(() => {
+  if (!current.value) return 'E';
+  return consoleId.value === 'ps1' ? ps1Region(current.value.data) : ps2Region(current.value.data);
+});
 
 // Boot customizations (PS1): text, logo and sounds. The BIOS side goes into a
 // copy of the original, and corruptions start from that copy.
@@ -438,10 +441,18 @@ onMounted(async () => {
         </p>
       </template>
 
-      <div v-else class="empty">
-        <p>The PlayStation 2 core is still being built.</p>
-        <p class="note">You can already store and corrupt PS2 BIOS files here, and download the result.</p>
-      </div>
+      <template v-else>
+        <Ps1Screen ref="screen" core="ps2" :bios="bootBytes" :region="region" :mini="mini" />
+        <label class="check note">
+          <input v-model="mini" type="checkbox" />
+          Keep a mini screen in the corner while I scroll down to the options
+        </label>
+        <p class="note">
+          The PS2 boots with no disc, through the Sony Computer Entertainment intro to the browser menu. Its intro draws a lot,
+          so most devices show it slower than real time. Render video keeps every frame at full speed, with sound. Use the
+          ROM0 file of your dump (4 MB); ROM1 isn't needed.
+        </p>
+      </template>
 
       <ByteMap
         v-if="current"

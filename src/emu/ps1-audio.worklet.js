@@ -1,19 +1,20 @@
-// Plays the PS1 core's 44.1 kHz stereo output on the audio thread. The
-// emulator worker sends Int16 chunks straight here over a MessagePort, so a
-// busy main thread can't cause gaps.
+// Plays an emulator core's stereo output on the audio thread (PS1: 44.1 kHz,
+// PS2: 48 kHz, given as processorOptions.rate). The emulator worker sends
+// Int16 chunks straight here over a MessagePort, so a busy main thread can't
+// cause gaps.
 
-const SOURCE_RATE = 44100;
 const PREBUFFER = 0.06; // seconds queued before (re)starting playback
 const MAX_QUEUE = 0.25; // seconds; older audio is dropped beyond this
 
 class Ps1Audio extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
+    this.rate = options?.processorOptions?.rate || 44100;
     this.chunks = [];
     this.queued = 0; // stereo frames held in chunks
     this.pos = 0; // fractional read position in chunks[0], in frames
     this.playing = false;
-    this.step = SOURCE_RATE / sampleRate;
+    this.step = this.rate / sampleRate;
     this.port.onmessage = (ev) => {
       if (ev.data.port) ev.data.port.onmessage = (e) => this.push(e.data);
       else if (ev.data === 'reset') this.reset();
@@ -32,7 +33,7 @@ class Ps1Audio extends AudioWorkletProcessor {
     if (!s.length) return;
     this.chunks.push(s);
     this.queued += s.length / 2;
-    while (this.queued > MAX_QUEUE * SOURCE_RATE && this.chunks.length > 1) {
+    while (this.queued > MAX_QUEUE * this.rate && this.chunks.length > 1) {
       const old = this.chunks.shift();
       this.queued -= old.length / 2;
       this.pos = 0;
@@ -52,7 +53,7 @@ class Ps1Audio extends AudioWorkletProcessor {
 
   process(_inputs, outputs) {
     const [l, r] = outputs[0];
-    if (!this.playing && this.queued - this.pos >= PREBUFFER * SOURCE_RATE) this.playing = true;
+    if (!this.playing && this.queued - this.pos >= PREBUFFER * this.rate) this.playing = true;
     for (let n = 0; n < l.length; n++) {
       l[n] = 0;
       if (r) r[n] = 0;

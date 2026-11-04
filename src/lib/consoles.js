@@ -78,3 +78,38 @@ export function ps1Region(bios) {
   }
   return 'E';
 }
+
+// The PS2 BIOS's ROMVER file, e.g. "0220EC20060210": version 2.20, region E
+// (Europe), console type C, built 2006-02-10. Found through its file table.
+export function ps2RomVer(bios) {
+  const at = includesAscii(bios, 'ROMVER', 0x10000);
+  if (at < 0) return null;
+  // Walk the table from RESET to the ROMVER entry, adding up file sizes.
+  const start = includesAscii(bios, 'RESET', 0x10000);
+  if (start < 0) return null;
+  let off = 0;
+  for (let e = start; e + 16 <= bios.length; e += 16) {
+    const size = bios[e + 12] | (bios[e + 13] << 8) | (bios[e + 14] << 16) | (bios[e + 15] << 24);
+    if (bios[e] === 0 && size === 0) break;
+    if (e === at) {
+      const text = String.fromCharCode(...bios.subarray(off, off + Math.min(size, 16))).replace(/[^\x20-\x7e]/g, '');
+      return text || null;
+    }
+    off += (size + 15) & ~15;
+  }
+  return null;
+}
+
+// A readable PS2 BIOS version, e.g. "2.20 Europe (2006-02-10)".
+export function ps2Version(bios) {
+  const v = ps2RomVer(bios);
+  if (!v || v.length < 14) return v;
+  const names = { J: 'Japan', A: 'USA', E: 'Europe', H: 'Asia', C: 'China', R: 'Russia', T: 'Test', X: 'Test' };
+  return `${v[0] === '0' ? v[1] : v.slice(0, 2)}.${v.slice(2, 4)} ${names[v[4]] || v[4]} (${v.slice(6, 10)}-${v.slice(10, 12)}-${v.slice(12, 14)})`;
+}
+
+// Region letter of a PS2 BIOS (J, A, E, H, C, R), from ROMVER.
+export function ps2Region(bios) {
+  const v = ps2RomVer(bios);
+  return v && v.length > 4 ? v[4] : 'E';
+}

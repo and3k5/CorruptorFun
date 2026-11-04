@@ -444,6 +444,12 @@ pub extern "C" fn ps2_spu_clock() -> u32 {
     sys().hw.spu2.clock
 }
 
+/// The emulator only runs the boot, never a game, so this stays 0.
+#[no_mangle]
+pub extern "C" fn ps2_game_started() -> u32 {
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn ps2_ee_pc() -> u32 {
     sys().ee.pc
