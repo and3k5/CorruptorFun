@@ -7,6 +7,8 @@ import { imageToLogo, MAX_BYTES, MAX_TRIANGLES } from '../lib/ps1custom/logo.js'
 import { DEFAULT_LICENSE, licenseText } from '../lib/ps1custom/license.js';
 import { decodeAudio, decodeImage, measureSamples, pixelsToUrl, playPcm, recordAudio } from '../lib/ps1custom/browser.js';
 import { naturalShift, originalSample, playedAs, renderNote } from '../lib/ps1custom/notes.js';
+import { coloursSetting, drawingToImage, imageToDrawing } from '../lib/ps1custom/draw.js';
+import LogoDraw from './LogoDraw.vue';
 
 // The boot customization form. Works on a plain object (see
 // ps1custom/index.js) and emits a new one on every change.
@@ -63,7 +65,7 @@ const logoBusy = ref(false);
 const logoOpts = computed(() => c.value.logo?.opts || { colours: 16, depth: false, detail: 0 });
 const logoPreview = computed(() => (c.value.logo ? pixelsToUrl(c.value.logo.preview, Math.max(1, Math.floor(240 / c.value.logo.preview.width))) : ''));
 
-function buildLogo(source, name, opts) {
+function buildLogo(source, name, opts, drawing = null) {
   logoError.value = '';
   try {
     const r = imageToLogo(source, { colours: opts.colours, depth: opts.depth, detail: opts.detail || undefined });
@@ -72,14 +74,17 @@ function buildLogo(source, name, opts) {
         name,
         source,
         opts,
+        drawing, // the editable drawing, when the logo was drawn here
         tmd: r.tmd,
         triangles: r.triangles,
         bytes: r.bytes,
         preview: { width: r.gw, height: r.gh, data: new Uint8Array(r.preview.buffer) },
       },
     });
+    return true;
   } catch (e) {
     logoError.value = e.message;
+    return false;
   }
 }
 
@@ -100,7 +105,32 @@ async function onLogo(ev) {
 
 function setLogoOpt(key, value) {
   if (!c.value.logo) return;
-  buildLogo(c.value.logo.source, c.value.logo.name, { ...logoOpts.value, [key]: value });
+  buildLogo(c.value.logo.source, c.value.logo.name, { ...logoOpts.value, [key]: value }, c.value.logo.drawing || null);
+}
+
+// Drawing the logo. The editor starts from the drawing behind the current
+// logo, or the pixel art a picture became, or blank. A closed editor's
+// drawing is kept (for this visit) until the logo changes some other way.
+const drawOpen = ref(false);
+const drawDraft = shallowRef(null); // { logo: the logo it was started from, drawing }
+const drawStart = computed(() => {
+  const logo = c.value.logo;
+  if (drawDraft.value && drawDraft.value.logo === logo) return drawDraft.value.drawing;
+  if (logo?.drawing) return logo.drawing;
+  if (logo?.preview) return imageToDrawing(logo.preview);
+  return null;
+});
+function closeDraw(drawing) {
+  drawDraft.value = { logo: c.value.logo, drawing };
+  drawOpen.value = false;
+}
+function applyDraw(drawing) {
+  // Drawn pixels map one to one onto the model's squares when they fit, and
+  // every colour is kept.
+  const ok = buildLogo(drawingToImage(drawing), 'Drawing', { ...logoOpts.value, colours: coloursSetting(drawing), detail: 0 }, drawing);
+  if (!ok) return;
+  drawDraft.value = null;
+  drawOpen.value = false;
 }
 
 // Sounds.
@@ -346,6 +376,7 @@ function resetAll() {
                 {{ logoBusy ? 'Reading…' : c.logo ? 'Change picture' : 'Use a picture' }}
                 <input type="file" accept="image/*" @change="onLogo" />
               </label>
+              <button class="small" @click="(logoError = ''), (drawOpen = true)">{{ c.logo?.drawing ? 'Edit drawing' : c.logo ? 'Draw on it' : 'Draw one' }}</button>
               <button v-if="c.logo" class="small" @click="update({ logo: null })">Back to the CF logo</button>
             </div>
             <template v-if="c.logo">
@@ -371,12 +402,14 @@ function resetAll() {
                 {{ (c.logo.bytes / 1024).toFixed(1) }} of {{ MAX_BYTES / 1024 }} KB.
               </p>
             </template>
-            <p v-if="logoError" class="note warn">{{ logoError }}</p>
+            <p v-if="logoError && !drawOpen" class="note warn">{{ logoError }}</p>
+            <LogoDraw v-if="drawOpen" :initial="drawStart" :depth="logoOpts.depth" :error="logoError" @apply="applyDraw" @close="closeDraw" />
             <p class="note">
               The BIOS draws the logo as a 3D model, made only of flat-coloured triangles: about 590 at most (more overruns
               its memory), in 14 KB. So your picture becomes pixel art. Squares of the same colour are merged, so logos and
               pixel art with a few flat colours keep the most detail; photos get blocky. Black and transparent parts are left
-              out.
+              out. Or draw one: the drawing is pixel art already, with no blending, so each colour you pick is kept and the
+              editor counts the triangles as you go.
             </p>
           </div>
         </template>
