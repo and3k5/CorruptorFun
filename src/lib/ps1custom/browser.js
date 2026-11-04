@@ -1,5 +1,10 @@
 // Browser-only helpers for the boot customizations: decoding pictures and
-// sounds the user picks, and drawing letters the BIOS pictures don't have.
+// sounds the user picks, recording, measuring how the BIOS plays its sounds,
+// and drawing letters the BIOS pictures don't have.
+
+import wasmUrl from '../../wasm/ps1.wasm?url';
+import { buildTestDisc } from '../testdisc.js';
+import { sampleUse } from './notes.js';
 
 // Fonts close to the originals: a heavy slab serif for SONY, a plain
 // grotesque for COMPUTER ENTERTAINMENT and PlayStation.
@@ -141,25 +146,53 @@ export function playPcm(pcm, rate) {
 /**
  * Records from the microphone. Returns { stop(), done } where `done`
  * resolves to the recording as a Blob once stopped (or after maxSeconds).
- * `onTick(seconds)` reports the time recorded so far.
+ *
+ * The silence before you start is trimmed later (see decodeAudio), so the
+ * recording also listens for when the sound starts. `onTick` gets
+ * { seconds, sound, level }: time recorded, time since the sound started
+ * (null before), and the input level (0..1). `autoStop()` is asked on every
+ * tick for how long after the sound starts to stop (null: don't).
  */
-export async function recordAudio({ maxSeconds = MAX_SECONDS, onTick } = {}) {
+export async function recordAudio({ maxSeconds = MAX_SECONDS, onTick, autoStop } = {}) {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
   });
   const rec = new MediaRecorder(stream);
   const chunks = [];
   rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  // Level meter, and the moment the sound starts.
+  let ac = null, analyser = null, buf = null;
+  try {
+    ac = new AudioContext();
+    analyser = ac.createAnalyser();
+    analyser.fftSize = 2048;
+    ac.createMediaStreamSource(stream).connect(analyser);
+    buf = new Float32Array(analyser.fftSize);
+  } catch {
+    analyser = null; // no meter; the time still counts
+  }
   const started = performance.now();
+  let soundAt = analyser ? null : started;
   const timer = setInterval(() => {
-    const s = (performance.now() - started) / 1000;
-    onTick?.(s);
-    if (s >= maxSeconds) stop();
-  }, 100);
+    const now = performance.now();
+    let level = 0;
+    if (analyser) {
+      analyser.getFloatTimeDomainData(buf);
+      for (const x of buf) level = Math.max(level, Math.abs(x));
+      // The same threshold decodeAudio trims at, a bit above it against noise.
+      if (soundAt === null && level > 0.02) soundAt = now - (buf.length / ac.sampleRate) * 500;
+    }
+    const seconds = (now - started) / 1000;
+    const sound = soundAt === null ? null : Math.max(0, (now - soundAt) / 1000);
+    onTick?.({ seconds, sound, level });
+    const after = autoStop?.();
+    if (seconds >= maxSeconds || (after && sound !== null && sound >= after)) stop();
+  }, 50);
   const done = new Promise((resolve) => {
     rec.onstop = () => {
       clearInterval(timer);
       stream.getTracks().forEach((t) => t.stop());
+      ac?.close();
       resolve(new Blob(chunks, { type: rec.mimeType }));
     };
   });
@@ -168,4 +201,36 @@ export async function recordAudio({ maxSeconds = MAX_SECONDS, onTick } = {}) {
   }
   rec.start();
   return { stop, done };
+}
+
+const measured = new WeakMap();
+/**
+ * Boots the untouched BIOS headlessly with the test disc (so the licensed
+ * screen chime plays too) and works out how it plays each boot sample; see
+ * notes.js. Resolves to sampleUse()'s result, or null. Cached per BIOS.
+ */
+export function measureSamples(bios, region) {
+  const key = bios;
+  const hit = measured.get(key);
+  if (hit?.region === region) return hit.promise;
+  const promise = (async () => {
+    const disc = buildTestDisc(region); // with a program that just loops
+    const w = new Worker(new URL('../../emu/ps1-probe.worker.js', import.meta.url), { type: 'module' });
+    try {
+      const r = await new Promise((resolve, reject) => {
+        w.onmessage = (ev) => (ev.data.error ? reject(new Error(ev.data.error)) : resolve(ev.data));
+        w.onerror = (e) => reject(new Error(e.message || 'worker failed'));
+        w.postMessage({ type: 'init', wasmUrl: new URL(wasmUrl, location.href).href });
+        const b = bios.slice().buffer;
+        const d = disc.slice().buffer;
+        w.postMessage({ type: 'notes', id: 0, bios: b, disc: d, region, frames: 60 * 40 }, [b, d]);
+      });
+      return sampleUse(bios, r.ram, r.log, { until: r.until });
+    } finally {
+      w.terminate();
+    }
+  })();
+  promise.catch(() => measured.delete(key));
+  measured.set(key, { region, promise });
+  return promise;
 }
