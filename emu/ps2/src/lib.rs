@@ -45,6 +45,8 @@ pub struct System {
     pub files: Vec<romdir::RomFile>,
     pub pc_hist_ee: std::collections::BTreeMap<u32, u32>,
     pub sample_pcs: bool,
+    /// EE cycles charged per instruction (higher = fewer instructions per frame).
+    pub ee_cpi: u32,
     /// A detected idle loop: [first NOP, branch address].
     idle_loop: Option<(u32, u32)>,
     pub idle_batches: u64,
@@ -74,6 +76,7 @@ impl System {
             files,
             pc_hist_ee: Default::default(),
             sample_pcs: false,
+            ee_cpi: 2,
             idle_loop: None,
             idle_batches: 0,
         };
@@ -114,7 +117,7 @@ impl System {
                 self.idle_batches += 1;
             }
             while c < BATCH {
-                c += self.ee.step(&mut self.hw);
+                c += self.ee.step(&mut self.hw) * self.ee_cpi / 2;
             }
             self.ee.add_count(c);
             if self.sample_pcs {

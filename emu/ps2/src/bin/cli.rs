@@ -56,8 +56,19 @@ fn main() {
     let mut sys = ps2::System::new(bios);
     sys.render = false;
     sys.sample_pcs = pcs;
+    if let Ok(v) = std::env::var("CPI") {
+        sys.ee_cpi = v.parse().unwrap();
+    }
     let t = std::time::Instant::now();
+    let mut lap = std::time::Instant::now();
     for f in 0..frames {
+        if std::env::var("LAPS").is_ok() && f % 50 == 0 && f > 0 {
+            eprintln!("frames {}-{}: {:.2?}, GS pixels {} prims {} tex {:?}", f - 50, f, lap.elapsed(), sys.hw.gs.draw.pixels, sys.hw.gs.draw.prims, sys.hw.gs.draw.stat_tex);
+            lap = std::time::Instant::now();
+        }
+        if std::env::var("SKIPODD").is_ok() {
+            sys.hw.gs.draw.skip = f % 2 == 1;
+        }
         sys.run_frame();
         if wav.is_some() {
             audio.extend_from_slice(&sys.hw.spu2.out);

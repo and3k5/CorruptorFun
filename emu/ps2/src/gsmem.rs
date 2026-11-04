@@ -245,6 +245,43 @@ pub fn write(mem: &mut [u32], psm: u32, bp: u32, bw: u32, x: u32, y: u32, v: u32
     }
 }
 
+/// Where a pixel lives: (word index, bit shift, value mask).
+#[inline]
+pub fn locate(psm: u32, bp: u32, bw: u32, x: u32, y: u32) -> (usize, u32, u32) {
+    match psm {
+        PSMCT32 => (addr32(bp, bw, x, y, false), 0, 0xFFFF_FFFF),
+        PSMZ32 => (addr32(bp, bw, x, y, true), 0, 0xFFFF_FFFF),
+        PSMCT24 => (addr32(bp, bw, x, y, false), 0, 0xFF_FFFF),
+        PSMZ24 => (addr32(bp, bw, x, y, true), 0, 0xFF_FFFF),
+        PSMT8H => (addr32(bp, bw, x, y, false), 24, 0xFF),
+        PSMT4HL => (addr32(bp, bw, x, y, false), 24, 0xF),
+        PSMT4HH => (addr32(bp, bw, x, y, false), 28, 0xF),
+        PSMCT16 | PSMCT16S | PSMZ16 | PSMZ16S => {
+            let a = addr16(psm, bp, bw, x, y);
+            (a >> 1, (a as u32 & 1) * 16, 0xFFFF)
+        }
+        PSMT8 => {
+            let a = addr8(bp, bw, x, y);
+            (a >> 2, (a as u32 & 3) * 8, 0xFF)
+        }
+        PSMT4 => {
+            let a = addr4(bp, bw, x, y);
+            (a >> 3, (a as u32 & 7) * 4, 0xF)
+        }
+        _ => (addr32(bp, bw, x, y, false), 0, 0xFFFF_FFFF),
+    }
+}
+
+/// Pixel size of a page in a format: (width, height).
+pub fn page_size(psm: u32) -> (u32, u32) {
+    match bpp(psm) {
+        16 => (64, 64),
+        8 => (128, 64),
+        4 => (128, 128),
+        _ => (64, 32),
+    }
+}
+
 /// Bits per pixel of a format.
 pub fn bpp(psm: u32) -> u32 {
     match psm {
