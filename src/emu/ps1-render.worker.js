@@ -118,7 +118,7 @@ async function render(msg) {
       const dt = 1 / (fn('is_pal')() === 1 ? 50 : 60);
       if (gs) {
         times.push([t, dt]);
-        gs.send(true);
+        gs.send(true, true);
         await gs.below(3);
         if (gsError) throw new Error(gsError);
         while (pictures.length) await addPicture(pictures.shift());

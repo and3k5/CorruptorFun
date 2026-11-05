@@ -65,8 +65,7 @@ function tick() {
       fn('run_frame')();
       frames++;
       flushAudio();
-      // A picture whenever the last one asked for is back.
-      if (gs) gs.send(!gs.pictureDue);
+      if (gs) gs.send(true);
       nextAt += frameMs;
       if (!runGame && fn('game_started')()) break;
     }
