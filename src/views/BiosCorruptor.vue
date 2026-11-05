@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
-import { CONSOLES, CONSOLE_LIST, detectConsole, ps1Region } from '../lib/consoles.js';
+import { CONSOLES, CONSOLE_LIST, detectConsole, ps1Region, ps2Region } from '../lib/consoles.js';
 import { DEFAULT_SETTINGS, ENGINES, clampRange, corrupt } from '../lib/corrupt.js';
 import { deleteBios, listBios, loadBios, loadCustom, saveBios, saveCustom } from '../lib/storage.js';
 import { loadDisc } from '../lib/disc.js';
@@ -13,6 +13,8 @@ import { canvasFallback } from '../lib/ps1custom/browser.js';
 import ByteMap from '../components/ByteMap.vue';
 import Ps1Screen from '../components/Ps1Screen.vue';
 import Ps1Customize from '../components/Ps1Customize.vue';
+import Ps2Customize from '../components/Ps2Customize.vue';
+import * as ps2custom from '../lib/ps2custom/index.js';
 
 const PREFS_KEY = 'corruptorfun.bios.prefs';
 
@@ -54,13 +56,22 @@ let easyCacheKey = '';
 const cons = computed(() => CONSOLES[consoleId.value]);
 const forConsole = computed(() => library.value.filter((b) => b.consoleId === consoleId.value));
 const range = computed(() => (current.value ? clampRange(settings, current.value.data.length) : { start: 0, end: 0 }));
-const region = computed(() => (current.value && consoleId.value === 'ps1' ? ps1Region(current.value.data) : 'E'));
+const region = computed(() => {
+  if (!current.value) return 'E';
+  return consoleId.value === 'ps1' ? ps1Region(current.value.data) : ps2Region(current.value.data);
+});
 
 // Boot customizations (PS1): text, logo and sounds. The BIOS side goes into a
 // copy of the original, and corruptions start from that copy.
+// PS2: the intro line, the no-disc message and the intro sounds.
 const custom = shallowRef(defaultCustom());
+const custom2 = shallowRef(ps2custom.defaultCustom());
+const changed = computed(() =>
+  consoleId.value === 'ps1' ? biosChanged(custom.value) : consoleId.value === 'ps2' && ps2custom.biosChanged(custom2.value),
+);
 const customized = computed(() => {
   if (!current.value) return { rom: null, notes: [], used: {} };
+  if (consoleId.value === 'ps2') return ps2custom.customizeBios(current.value.data, custom2.value);
   if (consoleId.value !== 'ps1') return { rom: current.value.data, notes: [], used: {} };
   return customizeBios(current.value.data, custom.value, { fallback: canvasFallback });
 });
@@ -68,7 +79,7 @@ const base = computed(() => customized.value.rom);
 const bootBytes = computed(() => result.value?.data || base.value);
 // A short fingerprint of the customized BIOS, for the Easy corrupt cache.
 const baseTag = computed(() => {
-  if (!base.value || !biosChanged(custom.value)) return '';
+  if (!base.value || !changed.value) return '';
   let h = 0x811c9dc5;
   for (let i = 0; i < base.value.length; i += 7) h = Math.imul(h ^ base.value[i], 0x01000193);
   return (h >>> 0).toString(16);
@@ -368,6 +379,20 @@ loadCustom('ps1')
   })
   .catch(() => {})
   .finally(() => (customLoaded = true));
+let custom2Loaded = false;
+loadCustom('ps2')
+  .then((v) => {
+    if (v) custom2.value = { ...ps2custom.defaultCustom(), ...v };
+  })
+  .catch(() => {})
+  .finally(() => (custom2Loaded = true));
+
+function onCustom2(next) {
+  custom2.value = next;
+  if (custom2Loaded) saveCustom('ps2', next).catch(() => {});
+  if (current.value && result.value) result.value = corrupt(base.value, settings);
+  if (current.value) bootNow();
+}
 
 function onCustom(next) {
   custom.value = next;
@@ -438,10 +463,18 @@ onMounted(async () => {
         </p>
       </template>
 
-      <div v-else class="empty">
-        <p>The PlayStation 2 core is still being built.</p>
-        <p class="note">You can already store and corrupt PS2 BIOS files here, and download the result.</p>
-      </div>
+      <template v-else>
+        <Ps1Screen ref="screen" core="ps2" :bios="bootBytes" :region="region" :mini="mini" />
+        <label class="check note">
+          <input v-model="mini" type="checkbox" />
+          Keep a mini screen in the corner while I scroll down to the options
+        </label>
+        <p class="note">
+          The PS2 boots with no disc, through the Sony Computer Entertainment intro to the browser menu. Its intro draws a lot,
+          so most devices show it slower than real time. Render video keeps every frame at full speed, with sound. Use the
+          ROM0 file of your dump (4 MB); ROM1 isn't needed.
+        </p>
+      </template>
 
       <ByteMap
         v-if="current"
@@ -552,6 +585,14 @@ onMounted(async () => {
         :used="customized.used"
         :test-disc="discIsTest"
         @update:model-value="onCustom"
+      />
+      <Ps2Customize
+        v-if="consoleId === 'ps2' && current"
+        :model-value="custom2"
+        :bios="current.data"
+        :notes="customized.notes"
+        :used="customized.used"
+        @update:model-value="onCustom2"
       />
     </aside>
   </div>

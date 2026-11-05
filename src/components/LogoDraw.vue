@@ -24,10 +24,15 @@ const props = defineProps({
   initial: { type: Object, default: null }, // a drawing (see draw.js)
   depth: { type: Boolean, default: false }, // 3D sides, for the triangle count
   error: { type: String, default: '' },
+  // Other uses (the PS2 intro line): grid sizes to offer, the title, and
+  // `simple` for a plain picture, without the PS1 logo's triangle count.
+  sizes: { type: Array, default: () => SIZES },
+  title: { type: String, default: 'Draw the logo' },
+  simple: { type: Boolean, default: false },
 });
 const emit = defineEmits(['apply', 'close']);
 
-const d = shallowRef(props.initial ? cloneDrawing(props.initial) : createDrawing());
+const d = shallowRef(props.initial ? cloneDrawing(props.initial) : props.simple ? createDrawing(...props.sizes[Math.min(1, props.sizes.length - 1)]) : createDrawing());
 const version = ref(0); // bumped on every change to d
 const touched = () => version.value++;
 
@@ -73,7 +78,7 @@ function clearAll() {
 // Size of the grid.
 const sizeKey = computed(() => `${d.value.width}x${d.value.height}`);
 const sizeOptions = computed(() => {
-  const list = SIZES.map(([w, h]) => ({ key: `${w}x${h}`, w, h }));
+  const list = props.sizes.map(([w, h]) => ({ key: `${w}x${h}`, w, h }));
   if (!list.some((o) => o.key === sizeKey.value)) list.push({ key: sizeKey.value, w: d.value.width, h: d.value.height });
   return list;
 });
@@ -420,6 +425,7 @@ watch(
     timer = setTimeout(() => {
       const img = drawingToImage(d.value);
       if (!img.data.some(Boolean)) return (result.value = { empty: true });
+      if (props.simple) return (result.value = { simple: true });
       try {
         const r = imageToLogo(img, { colours: coloursSetting(d.value), depth: props.depth });
         result.value = { ...r, url: pixelsToUrl({ width: r.gw, height: r.gh, data: r.preview }, 2) };
@@ -433,7 +439,8 @@ watch(
 const status = computed(() => {
   const r = result.value;
   if (!r) return '';
-  if (r.empty) return 'Empty: the CF logo stays until you draw something.';
+  if (r.empty) return props.simple ? 'Empty: draw something to use it.' : 'Empty: the CF logo stays until you draw something.';
+  if (r.simple) return `${d.value.width}×${d.value.height} pixels.`;
   if (r.error) return r.error;
   const coarser = r.gw < d.value.width;
   return `${r.triangles} of ${MAX_TRIANGLES} triangles` + (coarser ? `. Too detailed for ${d.value.width}×${d.value.height}, so it becomes ${r.gw}×${r.gh} squares (see the preview).` : `, at ${r.gw}×${r.gh} squares.`);
@@ -447,9 +454,9 @@ function apply() {
 
 <template>
   <Teleport to="body">
-    <div class="draw" role="dialog" aria-modal="true" aria-label="Draw the logo">
+    <div class="draw" role="dialog" aria-modal="true" :aria-label="title">
       <header class="bar">
-        <strong class="title">Draw the logo</strong>
+        <strong class="title">{{ title }}</strong>
         <div class="row">
           <button class="small" :disabled="!undoStack.length" title="Undo (Ctrl+Z)" aria-label="Undo" @click="undo">↶</button>
           <button class="small" :disabled="!redoStack.length" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" @click="redo">↷</button>

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ps1"]
+members = ["ps1", "ps2"]
 
 [profile.release]
 opt-level = 3
