@@ -116,8 +116,8 @@ impl System {
                 c = BATCH;
                 self.idle_batches += 1;
             }
-            while c < BATCH {
-                c += self.ee.step(&mut self.hw) * self.ee_cpi / 2;
+            if c < BATCH {
+                c += self.ee.run(&mut self.hw, BATCH - c, self.ee_cpi);
             }
             self.ee.add_count(c);
             if self.sample_pcs {
@@ -454,3 +454,110 @@ pub extern "C" fn ps2_game_started() -> u32 {
 pub extern "C" fn ps2_ee_pc() -> u32 {
     sys().ee.pc
 }
+
+// ---- Split drawing: this instance records, another one draws ----
+//
+// With `ps2_set_remote_gs(1)` the GS drawing commands of each frame collect
+// in a buffer (`ps2_gs_cmds_*`) instead of being drawn, so a second instance
+// of this module, in another worker, can draw them (`ps2_gs_*` below) while
+// this one runs the next frame.
+
+#[no_mangle]
+pub extern "C" fn ps2_set_remote_gs(on: u32) {
+    let s = sys();
+    s.hw.gs.remote = on != 0;
+    if on != 0 {
+        s.render = false;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_gs_cmds_ptr() -> *const u64 {
+    sys().hw.gs.cmds.as_ptr()
+}
+
+/// In u64s: (register, value) pairs.
+#[no_mangle]
+pub extern "C" fn ps2_gs_cmds_len() -> usize {
+    sys().hw.gs.cmds.len()
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_gs_cmds_clear() {
+    sys().hw.gs.cmds.clear();
+}
+
+static mut DISPLAY_REGS: [u64; 7] = [0; 7];
+
+/// The 7 display registers (see `Gs::display_regs`) as of now.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn ps2_display_regs() -> *const u64 {
+    unsafe {
+        DISPLAY_REGS = sys().hw.gs.display_regs();
+        DISPLAY_REGS.as_ptr()
+    }
+}
+
+struct Drawer {
+    gs: gs::Gs,
+    input: Vec<u64>,
+    frame: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+static mut DRAWER: Option<Drawer> = None;
+
+#[allow(static_mut_refs)]
+fn drawer() -> &'static mut Drawer {
+    unsafe {
+        DRAWER.get_or_insert_with(|| Drawer { gs: gs::Gs::new(), input: Vec::new(), frame: Vec::new(), width: 640, height: 448 })
+    }
+}
+
+/// Room for `n` u64s of input: the 7 display registers (`ps2_display_regs`),
+/// then the commands. Returns where to write them.
+#[no_mangle]
+pub extern "C" fn ps2_gs_input(n: usize) -> *mut u64 {
+    let d = drawer();
+    d.input.resize(n.max(7), 0);
+    d.input.as_mut_ptr()
+}
+
+/// Draws the commands in the first `n` u64s of the input and takes its
+/// display registers.
+#[no_mangle]
+pub extern "C" fn ps2_gs_run(n: usize) {
+    let d = drawer();
+    let n = n.min(d.input.len());
+    if n >= 7 {
+        d.gs.replay(&d.input[7..n]);
+        d.gs.set_display_regs(&d.input[..7]);
+    }
+}
+
+/// Builds the picture.
+#[no_mangle]
+pub extern "C" fn ps2_gs_render() {
+    let d = drawer();
+    let (w, h) = d.gs.render(&mut d.frame);
+    d.width = w;
+    d.height = h;
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_gs_frame_ptr() -> *const u8 {
+    drawer().frame.as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_gs_frame_width() -> u32 {
+    drawer().width
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_gs_frame_height() -> u32 {
+    drawer().height
+}
+

@@ -6,8 +6,14 @@
 // Frames are paced against the wall clock: if the device falls behind, the
 // worker runs extra frames without building their pictures to catch up, so
 // the boot (and its sound) keeps real speed instead of slowing down.
+//
+// The PS2 core draws in a worker of its own (see ps2-gs.js), a frame behind
+// the emulation, so the two run side by side.
+
+import { GsLink } from './ps2-gs.js';
 
 const MAX_CATCH_UP = 4; // frames per tick before we give up and slow down
+const MAX_GS_AHEAD = 3; // PS2: frames the emulation may run ahead of the drawing
 
 let wasm = null;
 let mem = () => new Uint8Array(wasm.memory.buffer);
@@ -18,6 +24,8 @@ let nextAt = 0;
 let runGame = false; // keep going after the hand-off (test disc)
 let handedOver = false;
 let core = 'ps1';
+let gs = null; // PS2: the drawing worker
+let frames = 0; // emulated so far
 // The core's export `name`, or a stand-in for one this core doesn't have.
 const fn = (name) => wasm[`${core}_${name}`] || (() => 0);
 
@@ -45,23 +53,33 @@ function tick() {
     nextAt = now;
     due = MAX_CATCH_UP;
   }
+  let waitForGs = false;
   try {
     for (let i = 0; i < due; i++) {
-      fn('set_render')(i === due - 1 ? 1 : 0);
+      if (gs && gs.inFlight >= MAX_GS_AHEAD) {
+        // The drawing is behind: wait for it (it wakes us).
+        waitForGs = true;
+        break;
+      }
+      if (!gs) fn('set_render')(i === due - 1 ? 1 : 0);
       fn('run_frame')();
+      frames++;
       flushAudio();
+      // A picture whenever the last one asked for is back.
+      if (gs) gs.send(!gs.pictureDue);
       nextAt += frameMs;
       if (!runGame && fn('game_started')()) break;
     }
   } catch (e) {
-    running = false;
-    postMessage({ type: 'error', message: `The emulator crashed: ${e.message}` });
+    fail(`The emulator crashed: ${e.message}`);
     return;
   }
-  const w = fn('frame_width')();
-  const h = fn('frame_height')();
-  const pixels = mem().slice(fn('frame_ptr')(), fn('frame_ptr')() + w * h * 4);
-  postMessage({ type: 'frame', w, h, pixels: pixels.buffer }, [pixels.buffer]);
+  if (!gs) {
+    const w = fn('frame_width')();
+    const h = fn('frame_height')();
+    const pixels = mem().slice(fn('frame_ptr')(), fn('frame_ptr')() + w * h * 4);
+    postMessage({ type: 'frame', w, h, frames, pixels: pixels.buffer }, [pixels.buffer]);
+  }
 
   if (fn('game_started')() && !handedOver) {
     handedOver = true;
@@ -71,7 +89,19 @@ function tick() {
       return;
     }
   }
+  if (waitForGs) {
+    gs.below(MAX_GS_AHEAD).then(() => {
+      if (running) tick();
+    });
+    return;
+  }
   timer = setTimeout(tick, Math.max(0, nextAt - performance.now()));
+}
+
+function fail(message) {
+  running = false;
+  clearTimeout(timer);
+  postMessage({ type: 'error', message });
 }
 
 onmessage = async (ev) => {
@@ -90,6 +120,10 @@ onmessage = async (ev) => {
         fn('set_disc')(copyIn(disc), disc.length);
       }
       fn('set_region')(msg.region.charCodeAt(0));
+      if (core === 'ps2') {
+        gs = new GsLink(wasm, msg.wasmUrl, fail);
+        gs.onFrame = (m) => postMessage({ type: 'frame', w: m.w, h: m.h, frames, pixels: m.pixels }, [m.pixels]);
+      }
       running = true;
       nextAt = performance.now();
       tick();
@@ -108,5 +142,7 @@ onmessage = async (ev) => {
   } else if (msg.type === 'stop') {
     running = false;
     clearTimeout(timer);
+    gs?.stop();
+    gs = null;
   }
 };

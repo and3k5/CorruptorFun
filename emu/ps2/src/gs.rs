@@ -20,6 +20,11 @@ pub struct Gs {
     /// GS register writes seen, by register number, for the report.
     pub reg_counts: [u32; 0x64],
     pub gif_qwords: [u64; 4],
+    /// Drawing happens elsewhere (another instance, see `replay`): register
+    /// writes that draw are recorded in `cmds` as (register, value) pairs
+    /// instead of being run here.
+    pub remote: bool,
+    pub cmds: Vec<u64>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -51,6 +56,8 @@ impl Gs {
             draw: Draw::new(),
             reg_counts: [0; 0x64],
             gif_qwords: [0; 4],
+            remote: false,
+            cmds: Vec::new(),
         }
     }
 
@@ -210,8 +217,8 @@ impl Gs {
             }
             _ => {
                 // IMAGE: NLOOP quadwords of HWREG data.
-                self.draw.hwreg(q as u64);
-                self.draw.hwreg((q >> 64) as u64);
+                self.write_reg(0x54, q as u64);
+                self.write_reg(0x54, (q >> 64) as u64);
                 self.gif.nloop -= 1;
                 if self.gif.nloop == 0 {
                     self.gif.active = false;
@@ -271,7 +278,43 @@ impl Gs {
         if (r as usize) < self.reg_counts.len() {
             self.reg_counts[r as usize] += 1;
         }
+        // SIGNAL, FINISH and LABEL raise events here, whoever draws.
+        if self.remote && !(0x60..=0x62).contains(&r) {
+            self.cmds.push(r as u64);
+            self.cmds.push(v);
+            return;
+        }
         self.draw.write_reg(r, v);
+    }
+
+    /// Runs drawing commands recorded by a remote `Gs` (see `remote`).
+    pub fn replay(&mut self, cmds: &[u64]) {
+        let mut disp = 0;
+        for c in cmds.chunks_exact(2) {
+            if c[0] == 0x7F {
+                // Display registers, in `display_regs` order (CLI recordings).
+                let mut r = self.display_regs();
+                r[disp % 7] = c[1];
+                self.set_display_regs(&r);
+                disp += 1;
+                continue;
+            }
+            self.draw.write_reg(c[0] as u32, c[1]);
+        }
+    }
+
+    /// The registers the picture read-out needs, for a remote drawer:
+    /// PMODE, SMODE2, DISPFB1, DISPLAY1, DISPFB2, DISPLAY2, BGCOLOR.
+    pub fn display_regs(&self) -> [u64; 7] {
+        [self.pmode, self.smode2, self.dispfb[0], self.display[0], self.dispfb[1], self.display[1], self.bgcolor]
+    }
+
+    pub fn set_display_regs(&mut self, r: &[u64]) {
+        self.pmode = r[0];
+        self.smode2 = r[1];
+        self.dispfb = [r[2], r[4]];
+        self.display = [r[3], r[5]];
+        self.bgcolor = r[6];
     }
 
     /// The displayed picture (read circuit 2 if enabled, else 1) as RGBA.

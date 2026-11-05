@@ -9,6 +9,30 @@ fn main() {
         eprintln!("usage: ps2-cli BIOS.BIN [--frames N] [--out frame.ppm] [--report] [--files] [--every N]");
         std::process::exit(1);
     }
+    // REPLAY=file: time drawing alone, from commands saved with REC=file.
+    if let Ok(f) = std::env::var("REPLAY") {
+        let raw = std::fs::read(f).expect("read replay");
+        let words: Vec<u64> = raw.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let mut gs = ps2::gs::Gs::new();
+        let t = std::time::Instant::now();
+        let (mut i, mut n) = (0, 0);
+        while i < words.len() {
+            let len = words[i] as usize;
+            gs.replay(&words[i + 1..i + 1 + len]);
+            i += 1 + len;
+            n += 1;
+        }
+        eprintln!("replayed {n} frames in {:.2?}", t.elapsed());
+        if let Ok(o) = std::env::var("REPLAY_OUT") {
+            let mut frame = Vec::new();
+            let (w, h) = gs.render(&mut frame);
+            let mut f = std::fs::File::create(o).unwrap();
+            write!(f, "P6\n{} {}\n255\n", w, h).unwrap();
+            let rgb: Vec<u8> = frame.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            f.write_all(&rgb).unwrap();
+        }
+        return;
+    }
     let bios = std::fs::read(&args[1]).expect("read BIOS");
     let mut frames = 300;
     let mut out: Option<String> = None;
@@ -59,6 +83,16 @@ fn main() {
     if let Ok(v) = std::env::var("CPI") {
         sys.ee_cpi = v.parse().unwrap();
     }
+    // REMOTE=1: draw in a second GS fed with the recorded commands, as the
+    // browser does with two workers.
+    let mut rec = std::env::var("REC").ok().map(|f| std::io::BufWriter::new(std::fs::File::create(f).unwrap()));
+    if rec.is_some() {
+        sys.hw.gs.remote = true;
+    }
+    let mut drawer = std::env::var("REMOTE").ok().map(|_| {
+        sys.hw.gs.remote = true;
+        ps2::gs::Gs::new()
+    });
     let t = std::time::Instant::now();
     let mut lap = std::time::Instant::now();
     for f in 0..frames {
@@ -69,21 +103,54 @@ fn main() {
         if std::env::var("SKIPODD").is_ok() {
             sys.hw.gs.draw.skip = f % 2 == 1;
         }
+        if std::env::var("SKIPALL").is_ok() {
+            sys.hw.gs.draw.skip = true;
+        }
         sys.run_frame();
+        if let Some(r) = rec.as_mut() {
+            // The display registers ride along, marked 0x7F.
+            for v in sys.hw.gs.display_regs() {
+                sys.hw.gs.cmds.push(0x7F);
+                sys.hw.gs.cmds.push(v);
+            }
+            let c = &sys.hw.gs.cmds;
+            r.write_all(&(c.len() as u64).to_le_bytes()).unwrap();
+            for v in c {
+                r.write_all(&v.to_le_bytes()).unwrap();
+            }
+            sys.hw.gs.cmds.clear();
+        }
+        if let Some(d) = drawer.as_mut() {
+            d.replay(&sys.hw.gs.cmds);
+            sys.hw.gs.cmds.clear();
+            d.set_display_regs(&sys.hw.gs.display_regs());
+        }
         if wav.is_some() {
             audio.extend_from_slice(&sys.hw.spu2.out);
             sys.hw.spu2.out.clear();
         }
         if every > 0 && f % every == 0 {
             if let Some(o) = &out {
-                sys.render_frame();
+                if let Some(d) = drawer.as_ref() {
+                    let (w, h) = d.render(&mut sys.frame);
+                    sys.width = w;
+                    sys.height = h;
+                } else {
+                    sys.render_frame();
+                }
                 save(&sys, &o.replace(".ppm", &format!("-{f:04}.ppm")));
             }
         }
     }
     eprintln!("{} frames in {:.2?} (idle batches {})", frames, t.elapsed(), sys.idle_batches);
     if let Some(o) = out {
-        sys.render_frame();
+        if let Some(d) = drawer.as_ref() {
+            let (w, h) = d.render(&mut sys.frame);
+            sys.width = w;
+            sys.height = h;
+        } else {
+            sys.render_frame();
+        }
         save(&sys, &o);
     }
     if let Some(d) = dump {
