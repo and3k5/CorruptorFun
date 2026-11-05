@@ -49,10 +49,21 @@ keep re-corrupting the untouched original.
   raised by whole octaves to about the speed you recorded, since the BIOS
   plays its samples 2 to 4 times slower). Customizations are kept in
   IndexedDB, and corruptions start from the customized BIOS.
-- **PlayStation 2:** in progress. You can already store, corrupt and download
-  PS2 BIOS files.
+- **PlayStation 2:** our own core in `emu/ps2` (EE R5900, IOP, DMA, GIF, a
+  software GS rasterizer, VU0/VU1 and the SPU2) boots the ROM0 file of a PS2
+  BIOS with no disc: the Sony Computer Entertainment intro with its sound, then
+  the browser menu. The intro draws a lot, so most devices show it slower than
+  real time; Render video records it at full speed. No pad is emulated yet.
+- **Customize the boot** (PS2, `src/lib/ps2custom/`): the "Sony Computer
+  Entertainment" line (typed text, an uploaded picture or a drawing in the
+  pixel editor), the "Please insert a PlayStation or PlayStation 2 format
+  disc" message, and the intro's sound samples (uploaded or recorded, with the
+  original to listen to and the length each slot holds). The BIOS keeps these
+  as compressed pictures and sounds in its file table; `romfs.js` reads and
+  rewrites the table (a grown file takes its room from the padding after it)
+  and `lz.js` is the BIOS's own compression, packed again.
 
-**Render video** (PS1) boots the BIOS again headlessly in a worker
+**Render video** (PS1 and PS2) boots the BIOS again headlessly in a worker
 (`src/emu/ps1-render.worker.js`), faster than real time where the device
 allows, and encodes every frame and the SPU sound with WebCodecs into an MP4
 (H.264 + AAC) or, where the browser can't encode those, a WebM (VP9 + Opus),

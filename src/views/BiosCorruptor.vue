@@ -13,6 +13,8 @@ import { canvasFallback } from '../lib/ps1custom/browser.js';
 import ByteMap from '../components/ByteMap.vue';
 import Ps1Screen from '../components/Ps1Screen.vue';
 import Ps1Customize from '../components/Ps1Customize.vue';
+import Ps2Customize from '../components/Ps2Customize.vue';
+import * as ps2custom from '../lib/ps2custom/index.js';
 
 const PREFS_KEY = 'corruptorfun.bios.prefs';
 
@@ -61,9 +63,15 @@ const region = computed(() => {
 
 // Boot customizations (PS1): text, logo and sounds. The BIOS side goes into a
 // copy of the original, and corruptions start from that copy.
+// PS2: the intro line, the no-disc message and the intro sounds.
 const custom = shallowRef(defaultCustom());
+const custom2 = shallowRef(ps2custom.defaultCustom());
+const changed = computed(() =>
+  consoleId.value === 'ps1' ? biosChanged(custom.value) : consoleId.value === 'ps2' && ps2custom.biosChanged(custom2.value),
+);
 const customized = computed(() => {
   if (!current.value) return { rom: null, notes: [], used: {} };
+  if (consoleId.value === 'ps2') return ps2custom.customizeBios(current.value.data, custom2.value);
   if (consoleId.value !== 'ps1') return { rom: current.value.data, notes: [], used: {} };
   return customizeBios(current.value.data, custom.value, { fallback: canvasFallback });
 });
@@ -71,7 +79,7 @@ const base = computed(() => customized.value.rom);
 const bootBytes = computed(() => result.value?.data || base.value);
 // A short fingerprint of the customized BIOS, for the Easy corrupt cache.
 const baseTag = computed(() => {
-  if (!base.value || !biosChanged(custom.value)) return '';
+  if (!base.value || !changed.value) return '';
   let h = 0x811c9dc5;
   for (let i = 0; i < base.value.length; i += 7) h = Math.imul(h ^ base.value[i], 0x01000193);
   return (h >>> 0).toString(16);
@@ -371,6 +379,20 @@ loadCustom('ps1')
   })
   .catch(() => {})
   .finally(() => (customLoaded = true));
+let custom2Loaded = false;
+loadCustom('ps2')
+  .then((v) => {
+    if (v) custom2.value = { ...ps2custom.defaultCustom(), ...v };
+  })
+  .catch(() => {})
+  .finally(() => (custom2Loaded = true));
+
+function onCustom2(next) {
+  custom2.value = next;
+  if (custom2Loaded) saveCustom('ps2', next).catch(() => {});
+  if (current.value && result.value) result.value = corrupt(base.value, settings);
+  if (current.value) bootNow();
+}
 
 function onCustom(next) {
   custom.value = next;
@@ -563,6 +585,14 @@ onMounted(async () => {
         :used="customized.used"
         :test-disc="discIsTest"
         @update:model-value="onCustom"
+      />
+      <Ps2Customize
+        v-if="consoleId === 'ps2' && current"
+        :model-value="custom2"
+        :bios="current.data"
+        :notes="customized.notes"
+        :used="customized.used"
+        @update:model-value="onCustom2"
       />
     </aside>
   </div>
