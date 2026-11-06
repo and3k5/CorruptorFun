@@ -1,7 +1,9 @@
 // Renders a boot to a video file: runs the PS1 core as fast as the device
 // allows (not in real time), draws every frame, and encodes the pictures and
 // the SPU's sound with WebCodecs. Every frame lands in the file, however slow
-// the device is, so the video never stutters or drifts out of sync.
+// the device is, so the video never stutters or drifts out of sync. The PS2
+// core draws in a worker of its own (see ps2-gs.js), side by side with the
+// emulation.
 
 import {
   Output,
@@ -17,6 +19,7 @@ import {
   getFirstEncodableVideoCodec,
   getFirstEncodableAudioCodec,
 } from 'mediabunny';
+import { GsLink } from './ps2-gs.js';
 
 let RATE = 44100; // the core's stereo output rate (PS2: 48 kHz)
 
@@ -63,6 +66,12 @@ async function render(msg) {
   }
   fn('set_region')(msg.region.charCodeAt(0));
   fn('set_render')(1);
+  let gsError = null;
+  const gs = core === 'ps2' ? new GsLink(wasm, msg.wasmUrl, (m) => (gsError = m)) : null;
+  // Pictures from the drawing worker, oldest first, with their times.
+  const pictures = [];
+  const times = [];
+  if (gs) gs.onFrame = (m) => pictures.push({ ...m, t: times.shift() });
 
   // The core's picture changes size during the boot (and between modes), so
   // each frame is stretched onto a fixed 4:3 canvas, pixels kept sharp.
@@ -82,6 +91,16 @@ async function render(msg) {
   }
   await output.start();
 
+  async function addPicture({ w, h, pixels, t: [at, dt] }) {
+    if (frame.width !== w || frame.height !== h) {
+      frame = new OffscreenCanvas(w, h);
+      frameCtx = frame.getContext('2d');
+    }
+    frameCtx.putImageData(new ImageData(new Uint8ClampedArray(pixels), w, h), 0, 0);
+    ctx.drawImage(frame, 0, 0, width, height);
+    await video.add(at, dt);
+  }
+
   let t = 0; // seconds of video so far
   let samples = 0; // stereo frames of audio so far
   let n = 0;
@@ -90,23 +109,25 @@ async function render(msg) {
   try {
     while (t < seconds) {
       if (cancelled) {
+        gs?.stop();
         await output.cancel();
         postMessage({ type: 'cancelled' });
         return;
       }
       fn('run_frame')();
       const dt = 1 / (fn('is_pal')() === 1 ? 50 : 60);
-
-      const w = fn('frame_width')();
-      const h = fn('frame_height')();
-      if (frame.width !== w || frame.height !== h) {
-        frame = new OffscreenCanvas(w, h);
-        frameCtx = frame.getContext('2d');
+      if (gs) {
+        times.push([t, dt]);
+        gs.send(true, true);
+        await gs.below(3);
+        if (gsError) throw new Error(gsError);
+        while (pictures.length) await addPicture(pictures.shift());
+      } else {
+        const w = fn('frame_width')();
+        const h = fn('frame_height')();
+        const px = new Uint8ClampedArray(wasm.memory.buffer, fn('frame_ptr')(), w * h * 4).slice();
+        await addPicture({ w, h, pixels: px.buffer, t: [t, dt] });
       }
-      const px = new Uint8ClampedArray(wasm.memory.buffer, fn('frame_ptr')(), w * h * 4);
-      frameCtx.putImageData(new ImageData(px.slice(), w, h), 0, 0);
-      ctx.drawImage(frame, 0, 0, width, height);
-      await video.add(t, dt);
 
       const len = fn('audio_len')();
       if (len) {
@@ -132,10 +153,17 @@ async function render(msg) {
         postMessage({ type: 'progress', seconds: t, of: seconds, frames: n });
       }
     }
+    if (gs) {
+      await gs.below(1);
+      if (gsError) throw new Error(gsError);
+      while (pictures.length) await addPicture(pictures.shift());
+    }
   } catch (e) {
+    gs?.stop();
     await output.cancel().catch(() => {});
     throw new Error(`The emulator crashed ${t.toFixed(1)} s in: ${e.message}`);
   }
+  gs?.stop();
   postMessage({ type: 'progress', seconds: t, of: seconds, frames: n, finishing: true });
   await output.finalize();
   const buffer = output.target.buffer;

@@ -54,6 +54,8 @@ pub struct Ee {
     /// Recent jump targets, for debugging hangs.
     pub hist: [u32; 64],
     pub hist_i: usize,
+    /// A COP0 instruction ran: interrupts may have been enabled.
+    irq_poll: bool,
 }
 
 #[inline(always)]
@@ -115,6 +117,7 @@ impl Ee {
             exceptions: 0,
             hist: [0; 64],
             hist_i: 0,
+            irq_poll: false,
         }
     }
 
@@ -168,6 +171,50 @@ impl Ee {
 
     fn interrupts_on(&self) -> bool {
         self.status & 0x0001_0001 == 0x0001_0001 && self.status & 0x6 == 0
+    }
+
+    /// Runs instructions for at least `budget` cycles at `cpi` cycles per
+    /// instruction (2 per unit); returns the cycles used. Interrupts can only
+    /// become pending between batches (the lines change outside) or after
+    /// a COP0 instruction, so that is when they are checked.
+    pub fn run(&mut self, hw: &mut Hw, budget: u32, cpi: u32) -> u32 {
+        let per = 2 * cpi / 2;
+        let mut c = 0;
+        if self.irq_ready() {
+            c += self.take_irq() * cpi / 2;
+        }
+        while c < budget {
+            self.cur_pc = self.pc;
+            self.in_delay = self.branch;
+            self.branch = false;
+            if self.cur_pc & 3 != 0 {
+                self.bad_vaddr = self.cur_pc;
+                self.exception(Exc::AdEL);
+                c += per;
+                continue;
+            }
+            let instr = hw.ee_fetch(self.cur_pc);
+            self.pc = self.next_pc;
+            self.next_pc = self.next_pc.wrapping_add(4);
+            self.exec(instr, hw);
+            c += per;
+            if self.irq_poll {
+                self.irq_poll = false;
+                if self.irq_ready() {
+                    c += self.take_irq() * cpi / 2;
+                }
+            }
+        }
+        c
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn take_irq(&mut self) -> u32 {
+        self.cur_pc = self.pc;
+        self.in_delay = self.branch;
+        self.exception(Exc::Int);
+        2
     }
 
     /// Runs one instruction; returns the cycles it took.
@@ -591,6 +638,7 @@ impl Ee {
     }
 
     fn cop0_op(&mut self, i: u32, hw: &mut Hw, rs: usize, rt: usize, rd: usize) {
+        self.irq_poll = true;
         match rs {
             0x00 => {
                 let v = match rd {

@@ -100,7 +100,9 @@ pub struct Hw {
     /// Instruction fetch cache: virtual page, and where it lives
     /// (bit 31 set = BIOS offset, else RAM offset); u32::MAX = none.
     fetch_page: u32,
-    fetch_base: u32,
+    /// Start of the 4 KB page `fetch_page` maps to, in `ram` or `bios`
+    /// (their buffers never move once allocated).
+    fetch_ptr: *const u8,
     tlb_mapped: Vec<u32>,
     /// Plain registers we only store (and log the first time).
     pub regs: BTreeMap<u32, u32>,
@@ -167,7 +169,7 @@ impl Hw {
             iop_irq_counts: [0; 32],
             tlb_map: vec![0; 1 << 20],
             fetch_page: u32::MAX,
-            fetch_base: 0,
+            fetch_ptr: std::ptr::null(),
             tlb_mapped: Vec::new(),
             regs: BTreeMap::new(),
             unknown_io: BTreeMap::new(),
@@ -299,17 +301,25 @@ impl Hw {
     #[inline(always)]
     pub fn ee_fetch(&mut self, addr: u32) -> u32 {
         if addr >> 12 == self.fetch_page {
-            let o = (self.fetch_base & 0x7FFF_FFFF) as usize + (addr & 0xFFF) as usize;
-            return if self.fetch_base & 0x8000_0000 != 0 { rd32(&self.bios, o) } else { rd32(&self.ram, o) };
+            // SAFETY: fetch_ptr points at a whole 4 KB page inside `ram` or
+            // `bios` (checked when it was set), and addr & 0xFFC + 4 <= 4096.
+            let b = unsafe { std::slice::from_raw_parts(self.fetch_ptr.add((addr & 0xFFC) as usize), 4) };
+            return u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
         }
+        self.ee_fetch_slow(addr)
+    }
+
+    #[inline(never)]
+    fn ee_fetch_slow(&mut self, addr: u32) -> u32 {
         let p = self.ee_xlate(addr);
         if p & 0x8000_0000 == 0 {
-            if p < 0x0200_0000 {
+            let page = (p & !0xFFF) as usize;
+            if p < 0x0200_0000 && page + 4096 <= self.ram.len() {
                 self.fetch_page = addr >> 12;
-                self.fetch_base = p & !0xFFF;
-            } else if (0x1FC0_0000..0x2000_0000).contains(&p) && ((p - 0x1FC0_0000) as usize) < self.bios.len() {
+                self.fetch_ptr = self.ram[page..].as_ptr();
+            } else if (0x1FC0_0000..0x2000_0000).contains(&p) && page - 0x1FC0_0000 + 4096 <= self.bios.len() {
                 self.fetch_page = addr >> 12;
-                self.fetch_base = 0x8000_0000 | ((p - 0x1FC0_0000) & !0xFFF);
+                self.fetch_ptr = self.bios[page - 0x1FC0_0000..].as_ptr();
             }
         }
         self.ee_read32(addr)

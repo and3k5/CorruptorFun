@@ -127,7 +127,7 @@ const COLUMN4: [[u32; 32]; 16] = [
     [401, 409, 433, 441, 465, 473, 497, 505, 403, 411, 435, 443, 467, 475, 499, 507, 405, 413, 437, 445, 469, 477, 501, 509, 407, 415, 439, 447, 471, 479, 503, 511],
 ];
 
-const WORDS: usize = 1 << 20; // 4 MB
+pub const WORDS: usize = 1 << 20; // 4 MB
 
 /// Word address of a 32-bit pixel. `bp` in blocks (64 words), `bw` in
 /// 64-pixel units.
@@ -272,6 +272,163 @@ pub fn locate(psm: u32, bp: u32, bw: u32, x: u32, y: u32) -> (usize, u32, u32) {
     }
 }
 
+// ------------------------------------------------- fast addressing --
+//
+// Within a page, a pixel's offset (in pixel units: words for 32-bit,
+// halfwords for 16-bit, ...) depends only on (x, y) inside the page, so it
+// is one table lookup; pages then just add up.
+
+const fn inner32(z: bool) -> [u16; 2048] {
+    let mut t = [0u16; 2048];
+    let mut y = 0;
+    while y < 32 {
+        let mut x = 0;
+        while x < 64 {
+            let b = if z { BLOCKZ32[(y >> 3) & 3][(x >> 3) & 7] } else { BLOCK32[(y >> 3) & 3][(x >> 3) & 7] };
+            t[y * 64 + x] = (b * 64 + COLUMN32[y & 7][x & 7]) as u16;
+            x += 1;
+        }
+        y += 1;
+    }
+    t
+}
+
+const fn inner16(bt: &[[u32; 4]; 8]) -> [u16; 4096] {
+    let mut t = [0u16; 4096];
+    let mut y = 0;
+    while y < 64 {
+        let mut x = 0;
+        while x < 64 {
+            t[y * 64 + x] = (bt[(y >> 3) & 7][(x >> 4) & 3] * 128 + COLUMN16[y & 7][x & 15]) as u16;
+            x += 1;
+        }
+        y += 1;
+    }
+    t
+}
+
+const fn inner8() -> [u16; 8192] {
+    let mut t = [0u16; 8192];
+    let mut y = 0;
+    while y < 64 {
+        let mut x = 0;
+        while x < 128 {
+            t[y * 128 + x] = (BLOCK8[(y >> 4) & 3][(x >> 4) & 7] * 256 + COLUMN8[y & 15][x & 15]) as u16;
+            x += 1;
+        }
+        y += 1;
+    }
+    t
+}
+
+const fn inner4() -> [u16; 16384] {
+    let mut t = [0u16; 16384];
+    let mut y = 0;
+    while y < 128 {
+        let mut x = 0;
+        while x < 128 {
+            t[y * 128 + x] = (BLOCK4[(y >> 4) & 7][(x >> 5) & 3] * 512 + COLUMN4[y & 15][x & 31]) as u16;
+            x += 1;
+        }
+        y += 1;
+    }
+    t
+}
+
+static T32: [u16; 2048] = inner32(false);
+static TZ32: [u16; 2048] = inner32(true);
+static T16: [u16; 4096] = inner16(&BLOCK16);
+static T16S: [u16; 4096] = inner16(&BLOCK16S);
+static TZ16: [u16; 4096] = inner16(&BLOCKZ16);
+static TZ16S: [u16; 4096] = inner16(&BLOCKZ16S);
+static T8: [u16; 8192] = inner8();
+static T4: [u16; 16384] = inner4();
+
+/// A buffer's layout, ready for fast addressing: `at(x, y)` gives the same
+/// (word, shift, mask) as `locate`.
+#[derive(Clone, Copy)]
+pub struct Swz {
+    tab: &'static [u16],
+    /// log2 of the page width and height in pixels.
+    pws: u32,
+    phs: u32,
+    /// log2 of pixels per word.
+    ppw: u32,
+    base: u32,
+    bwp: u32,
+    /// Bits of the word this format uses (shift, mask) for 32-bit containers.
+    pub shift: u32,
+    pub mask: u32,
+}
+
+impl Swz {
+    pub fn new(psm: u32, bp: u32, bw: u32) -> Swz {
+        let (tab, pws, phs, ppw): (&'static [u16], u32, u32, u32) = match psm {
+            PSMZ32 | PSMZ24 => (&TZ32, 6, 5, 0),
+            PSMCT16 => (&T16, 6, 6, 1),
+            PSMCT16S => (&T16S, 6, 6, 1),
+            PSMZ16 => (&TZ16, 6, 6, 1),
+            PSMZ16S => (&TZ16S, 6, 6, 1),
+            PSMT8 => (&T8, 7, 6, 2),
+            PSMT4 => (&T4, 7, 7, 3),
+            _ => (&T32, 6, 5, 0),
+        };
+        let (shift, mask) = match psm {
+            PSMCT24 | PSMZ24 => (0, 0xFF_FFFF),
+            PSMT8H => (24, 0xFF),
+            PSMT4HL => (24, 0xF),
+            PSMT4HH => (28, 0xF),
+            PSMCT16 | PSMCT16S | PSMZ16 | PSMZ16S => (0, 0xFFFF),
+            PSMT8 => (0, 0xFF),
+            PSMT4 => (0, 0xF),
+            _ => (0, 0xFFFF_FFFF),
+        };
+        let bwp = if ppw >= 2 { (bw >> 1).max(1) } else { bw.max(1) };
+        Swz { tab, pws, phs, ppw, base: bp << (6 + ppw), bwp, shift, mask }
+    }
+
+    /// Pixel-unit address of the start of row `y` (add `col` for x).
+    #[inline(always)]
+    pub fn row(&self, y: u32) -> u32 {
+        self.base.wrapping_add(((y >> self.phs) * self.bwp) << (11 + self.ppw))
+    }
+
+    /// Offset of x within a row (y inside the page given by `y`).
+    #[inline(always)]
+    pub fn col(&self, x: u32, y: u32) -> u32 {
+        let pw = 1 << self.pws;
+        let ph = 1 << self.phs;
+        ((x >> self.pws) << (11 + self.ppw)) + self.tab[(((y & (ph - 1)) << self.pws) | (x & (pw - 1))) as usize] as u32
+    }
+
+    /// (word index, bit shift, mask) of a pixel unit address.
+    #[inline(always)]
+    pub fn word(&self, ua: u32) -> (usize, u32, u32) {
+        let ua = ua & ((WORDS as u32) << self.ppw).wrapping_sub(1);
+        let sh = (ua & ((1 << self.ppw) - 1)) * (32 >> self.ppw);
+        ((ua >> self.ppw) as usize, sh + self.shift, self.mask)
+    }
+
+    #[inline(always)]
+    pub fn at(&self, x: u32, y: u32) -> (usize, u32, u32) {
+        self.word(self.row(y).wrapping_add(self.col(x, y)))
+    }
+
+    /// For formats whose pixel is the whole word (64x32 pages): the swizzle
+    /// of row `y` within its page, so x's word is
+    /// `row(y) + ((x >> 6) << 11) + tab_row32(y)[x & 63]` (wrapped to VRAM).
+    #[inline(always)]
+    pub fn tab_row32(&self, y: u32) -> &'static [u16; 64] {
+        let o = ((y & 31) << 6) as usize;
+        self.tab[o..o + 64].try_into().unwrap()
+    }
+
+    /// True for formats whose pixel is the whole word (fastest paths).
+    pub fn whole_word(&self) -> bool {
+        self.ppw == 0
+    }
+}
+
 /// Pixel size of a page in a format: (width, height).
 pub fn page_size(psm: u32) -> (u32, u32) {
     match bpp(psm) {
@@ -335,6 +492,20 @@ mod tests {
                 let a = addr8(0, 2, x, y);
                 assert!(!seen[a]);
                 seen[a] = true;
+            }
+        }
+    }
+
+    #[test]
+    fn fast_addressing_matches_locate() {
+        for psm in [PSMCT32, PSMCT24, PSMCT16, PSMCT16S, PSMT8, PSMT4, PSMT8H, PSMT4HL, PSMT4HH, PSMZ32, PSMZ24, PSMZ16, PSMZ16S] {
+            for (bp, bw) in [(0, 10), (0x2800, 16), (0x1E0F, 4), (0x3FF0, 1), (5, 0)] {
+                let s = Swz::new(psm, bp, bw);
+                for y in (0..600).step_by(7) {
+                    for x in (0..1100).step_by(5) {
+                        assert_eq!(s.at(x, y), locate(psm, bp, bw, x, y), "psm {psm:x} bp {bp:x} bw {bw} at {x},{y}");
+                    }
+                }
             }
         }
     }
