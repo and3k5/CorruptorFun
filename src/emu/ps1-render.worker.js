@@ -67,7 +67,7 @@ async function render(msg) {
   fn('set_region')(msg.region.charCodeAt(0));
   fn('set_render')(1);
   let gsError = null;
-  const gs = core === 'ps2' ? new GsLink(wasm, msg.wasmUrl, (m) => (gsError = m)) : null;
+  const gs = core === 'ps2' ? await GsLink.open(wasm, msg.wasmUrl, (m) => (gsError = m)) : null;
   // Pictures from the drawing worker, oldest first, with their times.
   const pictures = [];
   const times = [];
