@@ -2,7 +2,7 @@
 // replays the drawing commands the emulator worker records, so drawing one
 // frame runs at the same time as emulating the next.
 //
-// Messages in: { type: 'start', wasmUrl }, then { type: 'draw', buf, n, render, every }
+// Messages in: { type: 'start', wasmUrl } (answered with { type: 'ready' }), then { type: 'draw', buf, n, render, every }
 // with buf holding the 7 display registers and the frame's commands (n u64s).
 // Each draw is answered with { type: 'done' }, carrying the picture
 // ({ w, h, pixels }) when render was set, unless newer draws are already
@@ -17,6 +17,7 @@ let skipped = 0; // pictures skipped since the last one built
 async function start(url) {
   const { instance } = await WebAssembly.instantiateStreaming(fetch(url), {});
   wasm = instance.exports;
+  postMessage({ type: 'ready' });
 }
 
 function draw(m) {

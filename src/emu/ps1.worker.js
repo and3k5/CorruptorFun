@@ -120,8 +120,8 @@ onmessage = async (ev) => {
       }
       fn('set_region')(msg.region.charCodeAt(0));
       if (core === 'ps2') {
-        gs = new GsLink(wasm, msg.wasmUrl, fail);
-        gs.onFrame = (m) => postMessage({ type: 'frame', w: m.w, h: m.h, frames, pixels: m.pixels }, [m.pixels]);
+        gs = await GsLink.open(wasm, msg.wasmUrl, fail);
+        if (gs) gs.onFrame = (m) => postMessage({ type: 'frame', w: m.w, h: m.h, frames, pixels: m.pixels }, [m.pixels]);
       }
       running = true;
       nextAt = performance.now();
@@ -136,6 +136,7 @@ onmessage = async (ev) => {
     if (wasm) {
       fn('report')();
       text = new TextDecoder().decode(new Uint8Array(wasm.memory.buffer, fn('report_ptr')(), fn('report_len')()));
+      if (core === 'ps2') text += `\nDrawing: ${gs ? 'in its own worker' : 'in the emulator worker (the drawing worker could not start)'}`;
     }
     postMessage({ type: 'report', text });
   } else if (msg.type === 'stop') {
