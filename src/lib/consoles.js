@@ -58,6 +58,21 @@ export function detectConsole(bytes) {
   return null;
 }
 
+// The PS1 BIOS's version text, e.g. "System ROM Version 4.1 12/16/97 E". When
+// there are several, the last one is the full one. Null if none is found.
+export function ps1Version(bios) {
+  let found = null;
+  let from = 0;
+  for (;;) {
+    const at = includesAscii(bios.subarray(from), 'System ROM Version');
+    if (at < 0) return found;
+    let end = from + at;
+    while (end < bios.length && bios[end] >= 0x20 && bios[end] < 0x7f) end++;
+    found = String.fromCharCode(...bios.subarray(from + at, end)).trim();
+    from = end;
+  }
+}
+
 // Region letter of a PS1 BIOS from its version string, e.g.
 // "System ROM Version 4.1 12/16/97 E". The CD-ROM answers GetID with the
 // matching SCEx code so a licensed disc boots. Returns 'A', 'E' or 'I'.
