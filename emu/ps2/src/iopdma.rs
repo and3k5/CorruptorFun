@@ -100,6 +100,7 @@ impl IopDma {
             }
             return;
         }
+        let line_before = self.irq_line();
         match a {
             0x1F80_10F0 => self.dpcr = v,
             0x1F80_10F4 => {
@@ -115,6 +116,19 @@ impl IopDma {
             0x1F80_157C => self.dmacinten = v,
             _ => {}
         }
+        // The interrupt fires when DICR's IRQ bit goes from 0 to 1. The
+        // kernel's DMA handler turns the master enable off and back on, and
+        // a channel that finished in between must still interrupt then.
+        if !line_before && self.irq_line() {
+            self.irq = true;
+        }
+    }
+
+    /// DICR bit 31 without the force bit: master enable and a pending flag.
+    fn irq_line(&self) -> bool {
+        let f1 = (self.dicr >> 24) & (self.dicr >> 16) & 0x7F;
+        let f2 = (self.dicr2 >> 24) & (self.dicr2 >> 16) & 0x7F;
+        self.dicr & 0x80_0000 != 0 && (f1 | f2) != 0
     }
 
     fn running(&self, i: usize) -> bool {
