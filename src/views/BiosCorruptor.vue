@@ -14,6 +14,7 @@ import ByteMap from '../components/ByteMap.vue';
 import Ps1Screen from '../components/Ps1Screen.vue';
 import Ps1Customize from '../components/Ps1Customize.vue';
 import Ps2Customize from '../components/Ps2Customize.vue';
+import BiosFileDetails from '../components/BiosFileDetails.vue';
 import * as ps2custom from '../lib/ps2custom/index.js';
 
 const PREFS_KEY = 'corruptorfun.bios.prefs';
@@ -31,6 +32,8 @@ const consoleId = ref(CONSOLES[prefs.consoleId] ? prefs.consoleId : 'ps1');
 const settings = reactive({ ...DEFAULT_SETTINGS, ...(prefs.settings?.[consoleId.value] || {}) });
 
 const library = ref([]);
+// The stored file whose details are open in the list, by id.
+const detailsFor = ref(null);
 const current = shallowRef(null); // { id, name, consoleId, data }
 const result = shallowRef(null); // { data, hits }
 const message = ref('');
@@ -169,6 +172,7 @@ async function onFile(ev) {
 
 async function remove(id) {
   await deleteBios(id);
+  if (detailsFor.value === id) detailsFor.value = null;
   if (current.value?.id === id) {
     current.value = null;
     result.value = null;
@@ -404,6 +408,8 @@ function onCustom(next) {
   else bootNow();
 }
 
+const storedTotal = computed(() => library.value.reduce((n, b) => n + b.size, 0));
+
 const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(n % 1048576 ? 1 : 0)} MB` : `${Math.round(n / 1024)} KB`);
 
 onMounted(async () => {
@@ -492,13 +498,29 @@ onMounted(async () => {
         <h3>Your {{ cons.short }} files</h3>
         <p v-if="!storageOk" class="note warn">This browser blocked local storage, so files won't be remembered.</p>
         <ul v-if="forConsole.length" class="lib">
-          <li v-for="b in forConsole" :key="b.id" :class="{ on: current?.id === b.id }">
+          <li v-for="b in forConsole" :key="b.id" :class="{ on: current?.id === b.id, open: detailsFor === b.id }">
             <button class="link" :title="b.id" @click="useStored(b.id)">{{ b.name }}</button>
             <span class="note">{{ fmtSize(b.size) }}</span>
+            <button
+              class="small"
+              :class="{ active: detailsFor === b.id }"
+              :aria-expanded="detailsFor === b.id"
+              :aria-label="`Details for ${b.name}`"
+              title="Details, MD5, download, delete"
+              @click="detailsFor = detailsFor === b.id ? null : b.id"
+            >
+              ⓘ
+            </button>
             <button class="small danger" :aria-label="`Forget ${b.name}`" @click="remove(b.id)">✕</button>
+            <BiosFileDetails v-if="detailsFor === b.id" class="full" :entry="b" @delete="remove" />
           </li>
         </ul>
         <p v-else class="note">Nothing stored yet.</p>
+        <p v-if="library.length" class="note">
+          {{ library.length }} {{ library.length === 1 ? 'file' : 'files' }} ({{ fmtSize(storedTotal) }}) stored in this browser{{
+            library.length > forConsole.length ? ', across all consoles' : ''
+          }}.
+        </p>
         <label class="button small file">
           Add BIOS file
           <input type="file" @change="onFile" />
@@ -611,7 +633,10 @@ onMounted(async () => {
 .file input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .side { display: grid; gap: 16px; }
 .lib { list-style: none; padding: 0; margin: 0 0 10px; display: grid; gap: 4px; }
-.lib li { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 4px 6px; border-radius: 6px; }
+.lib li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 4px 6px; border-radius: 6px; }
+.lib li.open { outline: 1px solid var(--line); }
+.lib .full { grid-column: 1 / -1; }
+.lib button.active { border-color: var(--accent); color: var(--accent); }
 .lib li.on { background: var(--panel-2); }
 .link { background: none; border: 0; padding: 0; color: var(--text); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .link:hover { color: var(--accent); }
