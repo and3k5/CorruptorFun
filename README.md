@@ -53,7 +53,8 @@ keep re-corrupting the untouched original.
   software GS rasterizer, VU0/VU1 and the SPU2) boots the ROM0 file of a PS2
   BIOS with no disc: the Sony Computer Entertainment intro with its sound, then
   the browser menu. The intro draws a lot, so most devices show it slower than
-  real time; Render video records it at full speed. No pad is emulated yet.
+  real time (the sound then plays slower along with it instead of cutting in
+  and out); Render video records it at full speed. No pad is emulated yet.
 - **Customize the boot** (PS2, `src/lib/ps2custom/`): the "Sony Computer
   Entertainment" line (typed text, an uploaded picture or a drawing in the
   pixel editor), the "Please insert a PlayStation or PlayStation 2 format
