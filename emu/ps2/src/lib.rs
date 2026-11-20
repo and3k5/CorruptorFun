@@ -126,7 +126,17 @@ impl System {
             self.hw.tick_ee_timers(c / 2, self.line_cycles / 2);
             // IOP: one cycle per 8 EE cycles.
             self.iop_acc += c;
+            // Its idle loop is skipped (tried again after a step, in case
+            // the batch ended inside the loop).
+            let mut tries = 2;
             while self.iop_acc >= 16 {
+                if tries > 0 {
+                    tries -= 1;
+                    self.iop_acc -= self.iop.idle_skip(&mut self.hw, self.iop_acc / 16) * 16;
+                    if self.iop_acc < 16 {
+                        break;
+                    }
+                }
                 self.iop_acc -= self.iop.step(&mut self.hw) * 8;
             }
             self.hw.tick_iop_timers(c / 8, self.line_cycles / 8);
@@ -561,3 +571,101 @@ pub extern "C" fn ps2_gs_frame_height() -> u32 {
     drawer().height
 }
 
+
+// GPU drawing in the drawing worker (see `gsdraw::gpu` and
+// src/emu/ps2-gl.js): the same input as `ps2_gs_run`, but the drawing
+// comes out as commands for a WebGL2 renderer.
+
+/// Switches the drawing instance to GPU drawing.
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_enable() {
+    drawer().gs.draw.enable_gpu();
+}
+
+fn gpu() -> &'static mut gsdraw::gpu::Gpu {
+    drawer().gs.draw.gpu.as_mut().expect("GPU drawing on")
+}
+
+/// Runs input (as `ps2_gs_run`, `n` u64s) from command pair `start` on.
+/// Returns the pair it stopped at for a readback (`ps2_gs_gpu_readback`),
+/// or the number of pairs when done; then the display registers are taken.
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_run(start: usize, n: usize) -> usize {
+    let d = drawer();
+    let n = n.min(d.input.len());
+    if n < 7 {
+        return 0;
+    }
+    let pairs = (n - 7) / 2;
+    let at = d.gs.replay_from(&d.input[7..7 + pairs * 2], start);
+    if at >= pairs {
+        d.gs.set_display_regs(&d.input[..7]);
+    }
+    at
+}
+
+/// Asks for the picture; 0 when queued, 1 when it waits for a readback.
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_display() -> u32 {
+    if drawer().gs.gpu_display() { 0 } else { 1 }
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_cmds_ptr() -> *const u32 {
+    gpu().cmds.as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_cmds_len() -> usize {
+    gpu().cmds.len()
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_verts_ptr() -> *const f32 {
+    gpu().verts.as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_verts_len() -> usize {
+    gpu().verts.len()
+}
+
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_blob_ptr() -> *const u8 {
+    gpu().blob.as_ptr()
+}
+
+/// Empties the buffers once the renderer has run them.
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_clear() {
+    gpu().clear();
+}
+
+/// The target whose pixels drawing waits for, or -1.
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_readback() -> i32 {
+    gpu().readback.map(|t| t as i32).unwrap_or(-1)
+}
+
+/// Room for the readback (target width * 1024 * 4 bytes); returns where.
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_readback_buf() -> *mut u8 {
+    let d = drawer();
+    let id = d.gs.draw.gpu.as_ref().unwrap().readback.unwrap_or(0);
+    let (w, h) = d.gs.draw.gpu_target_size(id);
+    let g = gpu();
+    g.readback_buf.resize((w * h * 4) as usize, 0);
+    g.readback_buf.as_mut_ptr()
+}
+
+/// The readback buffer is filled: takes it into local memory.
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_readback_done() {
+    drawer().gs.draw.gpu_readback_done();
+}
+
+/// Width of a target, for the readback.
+#[no_mangle]
+pub extern "C" fn ps2_gs_gpu_target_width(id: usize) -> u32 {
+    drawer().gs.draw.gpu_target_size(id).0
+}
