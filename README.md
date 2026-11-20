@@ -50,7 +50,8 @@ keep re-corrupting the untouched original.
   plays its samples 2 to 4 times slower). Customizations are kept in
   IndexedDB, and corruptions start from the customized BIOS.
 - **PlayStation 2:** our own core in `emu/ps2` (EE R5900, IOP, DMA, GIF, a
-  software GS rasterizer, VU0/VU1 and the SPU2) boots the ROM0 file of a PS2
+  GS that draws with WebGL2 where the device has a GPU and with a software
+  rasterizer otherwise, VU0/VU1 and the SPU2) boots the ROM0 file of a PS2
   BIOS with no disc: the Sony Computer Entertainment intro with its sound, then
   the browser menu. The intro draws a lot, so most devices show it slower than
   real time (the sound then keeps its pitch but plays slower along with it,

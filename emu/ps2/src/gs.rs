@@ -303,6 +303,27 @@ impl Gs {
         }
     }
 
+    /// `replay` from (register, value) pair `start` on, stopping where GPU
+    /// drawing waits for a readback (see `gsdraw::gpu`). Returns the pair
+    /// to go on from (`cmds.len() / 2` when all ran).
+    pub fn replay_from(&mut self, cmds: &[u64], start: usize) -> usize {
+        let n = cmds.len() / 2;
+        for i in start..n {
+            self.draw.write_reg(cmds[i * 2] as u32, cmds[i * 2 + 1]);
+            if self.draw.stalled() {
+                return i;
+            }
+        }
+        n
+    }
+
+    /// The picture, on the GPU (see `gsdraw::gpu`); false when it waits for
+    /// a readback.
+    pub fn gpu_display(&mut self) -> bool {
+        let (pmode, smode2, dispfb, display, bg) = (self.pmode, self.smode2, self.dispfb, self.display, self.bgcolor);
+        self.draw.gpu_display(pmode, smode2, &dispfb, &display, bg)
+    }
+
     /// The registers the picture read-out needs, for a remote drawer:
     /// PMODE, SMODE2, DISPFB1, DISPLAY1, DISPFB2, DISPLAY2, BGCOLOR.
     pub fn display_regs(&self) -> [u64; 7] {

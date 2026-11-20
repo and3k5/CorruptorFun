@@ -81,6 +81,11 @@ function draw() {
     c.width = f.w;
     c.height = f.h;
   }
+  if (f.bitmap) {
+    c.getContext('2d').drawImage(f.bitmap, 0, 0);
+    f.bitmap.close();
+    return;
+  }
   c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(f.pixels), f.w, f.h), 0, 0);
 }
 
@@ -245,6 +250,7 @@ async function boot() {
     const m = ev.data;
     if (m.type === 'frame') {
       lastFrame = performance.now();
+      pending?.bitmap?.close(); // replaced before it was drawn
       pending = m;
       raf = raf || requestAnimationFrame(draw);
     } else if (m.type === 'game-started') {

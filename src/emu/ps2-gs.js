@@ -2,15 +2,17 @@
 // records each frame's GS commands instead of drawing them, and `send` hands
 // them over. Frames come back through `onFrame`, in order. Where the drawing
 // worker can't start (no workers inside workers, a load error, no answer),
-// `GsLink.open` gives null and the core keeps drawing by itself.
+// `GsLink.open` gives null and the core keeps drawing by itself. With gpu
+// asked for, the drawing worker uses WebGL2 where it can (`link.gpu` says
+// whether it does), and frames carry an ImageBitmap instead of pixels.
 
 const READY_MS = 5000;
 
 export class GsLink {
-  static async open(wasm, wasmUrl, onError) {
+  static async open(wasm, wasmUrl, onError, gpu = false) {
     let link;
     try {
-      link = new GsLink(wasm, wasmUrl, onError);
+      link = new GsLink(wasm, wasmUrl, onError, gpu);
     } catch {
       return null;
     }
@@ -23,8 +25,9 @@ export class GsLink {
     return null;
   }
 
-  constructor(wasm, wasmUrl, onError) {
+  constructor(wasm, wasmUrl, onError, gpu) {
     this.wasm = wasm;
+    this.gpu = false;
     this.inFlight = 0; // frames sent but not drawn yet
     this.onFrame = null;
     this.waiters = [];
@@ -43,10 +46,11 @@ export class GsLink {
       const m = ev.data;
       if (m.type === 'ready') {
         clearTimeout(timer);
+        this.gpu = !!m.gpu;
         answer(true);
       } else if (m.type === 'done') {
         this.inFlight--;
-        if (m.pixels) this.onFrame?.(m);
+        if (m.pixels || m.bitmap) this.onFrame?.(m);
         for (const r of this.waiters.splice(0)) r();
       } else if (m.type === 'error') {
         failed(m.message);
@@ -56,7 +60,7 @@ export class GsLink {
       e.preventDefault();
       failed(`The PS2 drawing worker failed: ${e.message || 'unknown error'}`);
     };
-    this.worker.postMessage({ type: 'start', wasmUrl });
+    this.worker.postMessage({ type: 'start', wasmUrl, gpu });
   }
 
   // Sends the commands the last frame recorded; render asks for its picture

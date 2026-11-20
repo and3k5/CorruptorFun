@@ -14,15 +14,44 @@ fn main() {
         let raw = std::fs::read(f).expect("read replay");
         let words: Vec<u64> = raw.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
         let mut gs = ps2::gs::Gs::new();
+        // GPU=1: build the GPU drawing commands instead (readbacks get no
+        // pixels here), to time them and count draws.
+        let gpu = std::env::var("GPU").is_ok();
+        if gpu {
+            gs.draw.enable_gpu();
+        }
+        let (mut words_out, mut verts_out) = (0usize, 0usize);
         let t = std::time::Instant::now();
         let (mut i, mut n) = (0, 0);
         while i < words.len() {
             let len = words[i] as usize;
-            gs.replay(&words[i + 1..i + 1 + len]);
+            if gpu {
+                let cmds = &words[i + 1..i + 1 + len];
+                let mut at = 0;
+                loop {
+                    at = gs.replay_from(cmds, at);
+                    if at >= cmds.len() / 2 {
+                        break;
+                    }
+                    gs.draw.gpu_readback_done();
+                }
+                while !gs.gpu_display() {
+                    gs.draw.gpu_readback_done();
+                }
+                let g = gs.draw.gpu.as_mut().unwrap();
+                words_out += g.cmds.len();
+                verts_out += g.verts.len() / ps2::gsdraw::gpu::VERT_FLOATS;
+                g.clear();
+            } else {
+                gs.replay(&words[i + 1..i + 1 + len]);
+            }
             i += 1 + len;
             n += 1;
         }
         eprintln!("replayed {n} frames in {:.2?}", t.elapsed());
+        if let Some(g) = gs.draw.gpu.as_ref() {
+            eprintln!("GPU: {} draws, {} readbacks, {} texture uploads, {} target uploads; {} command words, {} vertices", g.stats[0], g.stats[1], g.stats[2], g.stats[3], words_out, verts_out);
+        }
         if let Ok(o) = std::env::var("REPLAY_OUT") {
             let mut frame = Vec::new();
             let (w, h) = gs.render(&mut frame);

@@ -5,6 +5,8 @@
 use crate::gsmem::{self, *};
 use crate::gsmem::WORDS;
 
+pub mod gpu;
+
 #[derive(Clone, Copy, Default)]
 struct Vertex {
     x: i32, // 12.4 fixed, offset removed
@@ -41,6 +43,8 @@ pub struct Draw {
     pub stat_tex: [u64; 4],
     /// Don't rasterize (frames nobody will see).
     pub skip: bool,
+    /// Draw on the GPU instead (see `gpu`).
+    pub gpu: Option<Box<gpu::Gpu>>,
     queue: [Vertex; 3],
     count: usize,
     /// Triangle fan anchor.
@@ -211,6 +215,7 @@ impl Draw {
             pixels: 0,
             stat_tex: [0; 4],
             skip: false,
+            gpu: None,
             queue: [Vertex::default(); 3],
             count: 0,
             fan0: Vertex::default(),
@@ -357,6 +362,10 @@ impl Draw {
 
     pub fn write_reg(&mut self, r: u32, v: u64) {
         let r = r as usize;
+        if self.gpu.is_some() && !self.gpu_pre(r, v) {
+            // Waits for a readback; the caller sends this write again.
+            return;
+        }
         match r {
             0x00 => {
                 self.regs[0] = v;
@@ -459,6 +468,15 @@ impl Draw {
         }
         if kick && !self.skip {
             self.prims += 1;
+            if self.gpu.is_some() {
+                let q = self.queue;
+                if self.gpu_prim(prim, &q, a, &c) {
+                    if matches!(prim, 0 | 1 | 3 | 6) {
+                        self.count = 0;
+                    }
+                    return;
+                }
+            }
             if a.tme && !matches!(bits(c.tex0, 20, 6), PSMCT32 | PSMCT24) {
                 self.prepare_texture(&c);
             }
@@ -1603,6 +1621,10 @@ impl Draw {
             }
             let (x, y) = ((dx + t.x) & 2047, (dy + t.y) & 2047);
             self.put(dpsm, dbp, dbw, x, y, px);
+            if self.gpu.is_some() {
+                let i = gsmem::locate(dpsm, dbp, dbw, x, y).0;
+                self.gpu_xfer_pixel(i, dpsm);
+            }
             let t = &mut self.xfer;
             t.x += 1;
             if t.x >= w {
