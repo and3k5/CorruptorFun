@@ -126,7 +126,17 @@ impl System {
             self.hw.tick_ee_timers(c / 2, self.line_cycles / 2);
             // IOP: one cycle per 8 EE cycles.
             self.iop_acc += c;
+            // Its idle loop is skipped (tried again after a step, in case
+            // the batch ended inside the loop).
+            let mut tries = 2;
             while self.iop_acc >= 16 {
+                if tries > 0 {
+                    tries -= 1;
+                    self.iop_acc -= self.iop.idle_skip(&mut self.hw, self.iop_acc / 16) * 16;
+                    if self.iop_acc < 16 {
+                        break;
+                    }
+                }
                 self.iop_acc -= self.iop.step(&mut self.hw) * 8;
             }
             self.hw.tick_iop_timers(c / 8, self.line_cycles / 8);

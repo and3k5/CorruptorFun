@@ -89,6 +89,33 @@ impl Iop {
         self.load = (i, v);
     }
 
+    /// The IOP's idle thread waits for an interrupt in `j .` (or `b .`)
+    /// with a NOP in the delay slot. When it is there, at the jump, and no
+    /// interrupt would be taken, up to `max` steps of the loop are skipped
+    /// (an even number, so it ends where it began, exactly as if they ran).
+    /// Returns the number skipped.
+    pub fn idle_skip(&mut self, bus: &mut Bus, max: u32) -> u32 {
+        let pc = self.pc;
+        if max < 2 || self.branch || self.load.0 != 0 || pc & 3 != 0 || self.next_pc != pc.wrapping_add(4) {
+            return 0;
+        }
+        let i = bus.iop_fetch(pc);
+        let jump_self = i >> 26 == 2 && (pc & 0xF000_0000) | ((i & 0x03FF_FFFF) << 2) == pc;
+        if !(jump_self || i == 0x1000_FFFF) || bus.iop_fetch(pc.wrapping_add(4)) != 0 {
+            return 0;
+        }
+        // As step does before each instruction.
+        if bus.iop_irq_pending() {
+            self.cause |= 1 << 10;
+        } else {
+            self.cause &= !(1 << 10);
+        }
+        if self.sr & 1 != 0 && (self.sr & self.cause & 0xFF00) != 0 {
+            return 0;
+        }
+        max & !1
+    }
+
     /// Executes one instruction. Returns the number of cycles it took.
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
         self.current_pc = self.pc;
